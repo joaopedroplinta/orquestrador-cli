@@ -7,6 +7,7 @@ import { runPipeline } from "../orchestrator/pipeline.js";
 import { planTask } from "../orchestrator/router.js";
 import { listRuns } from "../storage/history.js";
 import { AgentError, PipelineCancelledError, type AgentName, type AgentRunResult } from "../types.js";
+import { applyModeCommand, INITIAL_MODE_STATE, parseInput, type ModeState } from "./commands.js";
 
 type TranscriptEntry =
   | { kind: "banner"; id: string }
@@ -34,9 +35,29 @@ function Banner() {
         ⚡ orquestrador
       </Text>
       <Text dimColor>Orquestra Claude Code + Antigravity numa mesma tarefa.</Text>
+      <Text dimColor>Digite uma tarefa e aperte Enter.</Text>
       <Text dimColor>
-        Digite uma tarefa e aperte Enter. <Text color="green">/history</Text> ·{" "}
-        <Text color="green">/exit</Text> · Ctrl+C
+        <Text color="green">/history</Text> · <Text color="green">/agent claude|antigravity|auto</Text> ·{" "}
+        <Text color="green">/auto</Text> · <Text color="green">/exit</Text> · Ctrl+C
+      </Text>
+    </Box>
+  );
+}
+
+function StatusLine({ mode }: { mode: ModeState }) {
+  return (
+    <Box marginTop={1}>
+      <Text dimColor>agente: </Text>
+      {mode.forcedAgent ? (
+        <Text color={agentColor(mode.forcedAgent)} bold>
+          {mode.forcedAgent} (forçado)
+        </Text>
+      ) : (
+        <Text dimColor>automático</Text>
+      )}
+      <Text dimColor>{"   auto: "}</Text>
+      <Text color={mode.autoMode ? "green" : undefined} dimColor={!mode.autoMode} bold={mode.autoMode}>
+        {mode.autoMode ? "ligado" : "desligado"}
       </Text>
     </Box>
   );
@@ -50,6 +71,7 @@ export default function App() {
   const [runningTask, setRunningTask] = useState<string | null>(null);
   const [pendingAgentPrompt, setPendingAgentPrompt] = useState<PendingAgentPrompt | undefined>();
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [mode, setMode] = useState<ModeState>(INITIAL_MODE_STATE);
 
   useEffect(() => {
     if (status !== "running") {
@@ -82,7 +104,7 @@ export default function App() {
 
   const runTask = useCallback(
     async (task: string) => {
-      const agents = planTask(task).map((step) => step.agent);
+      const agents = mode.forcedAgent ? [mode.forcedAgent] : planTask(task).map((step) => step.agent);
       setStatus("running");
       setRunningTask(task);
       addEntry({ kind: "task", id: randomUUID(), text: task, agents });
@@ -90,6 +112,8 @@ export default function App() {
       try {
         const result = await runPipeline({
           task,
+          forceAgent: mode.forcedAgent ?? undefined,
+          auto: mode.autoMode,
           resolveAmbiguousAgent: (ambiguousTask) =>
             new Promise<AgentName | null>((resolve) => {
               setPendingAgentPrompt({ task: ambiguousTask, resolve });
@@ -118,7 +142,7 @@ export default function App() {
         setRunningTask(null);
       }
     },
-    [addEntry],
+    [addEntry, mode],
   );
 
   const handleSubmit = useCallback(
@@ -151,23 +175,53 @@ export default function App() {
 
       if (status === "running") return;
 
-      if (trimmed === "/exit" || trimmed === "/quit") {
-        exit();
-        return;
-      }
-      if (trimmed === "/history") {
-        showHistory();
-        return;
-      }
+      const parsed = parseInput(trimmed);
 
-      void runTask(trimmed);
+      switch (parsed.kind) {
+        case "exit":
+          exit();
+          return;
+        case "history":
+          showHistory();
+          return;
+        case "set-agent": {
+          const nextMode = applyModeCommand(mode, parsed);
+          setMode(nextMode);
+          addEntry({
+            kind: "info",
+            id: randomUUID(),
+            text: nextMode.forcedAgent
+              ? `Agente forçado: ${nextMode.forcedAgent}. Use "/agent auto" pra voltar ao roteamento normal.`
+              : "Roteamento normal restaurado (palavra-chave / --auto).",
+          });
+          return;
+        }
+        case "toggle-auto": {
+          const nextMode = applyModeCommand(mode, parsed);
+          setMode(nextMode);
+          addEntry({
+            kind: "info",
+            id: randomUUID(),
+            text: `Classificação automática (--auto) ${nextMode.autoMode ? "ligada" : "desligada"}.`,
+          });
+          return;
+        }
+        case "error":
+          addEntry({ kind: "error", id: randomUUID(), message: parsed.message });
+          return;
+        case "task":
+          void runTask(parsed.text);
+          return;
+      }
     },
-    [status, pendingAgentPrompt, addEntry, exit, showHistory, runTask],
+    [status, pendingAgentPrompt, mode, addEntry, exit, showHistory, runTask],
   );
 
   return (
     <Box flexDirection="column">
       <Static items={transcript}>{(entry) => <TranscriptEntryView key={entry.id} entry={entry} />}</Static>
+
+      <StatusLine mode={mode} />
 
       {status === "running" && (
         <Box marginTop={1}>

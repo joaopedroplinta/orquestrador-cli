@@ -47,19 +47,31 @@ Dentro da tela:
 - Cada tarefa digitada roda pela mesma resolução de plano do `run` de uma
   tarefa só (`planTask` por palavra-chave; se ambígua, aparece um prompt
   pra escolher `claude`, `antigravity` ou `cancelar`, embutido na própria
-  tela).
+  tela) — a menos que `/agent` esteja forçando um agente (ver abaixo).
 - `/history` — lista as execuções passadas (inclusive as da sessão atual,
   já que tudo é persistido normalmente em SQLite).
 - `/exit` ou `/quit` — sai. `Ctrl+C` também sai a qualquer momento.
+- `/agent claude` ou `/agent antigravity` — força esse agente pras
+  **próximas tarefas digitadas** (equivalente ao `--agent` do modo CLI),
+  até você trocar de novo ou rodar `/agent auto` pra voltar ao roteamento
+  normal (por palavra-chave / `--auto`).
+- `/auto` — liga/desliga a classificação automática via `claude` quando o
+  roteamento por palavra-chave vem vazio (equivalente ao `--auto` do modo
+  CLI). Independente de `/agent`: dá pra ter os dois ligados, ou só um.
+- Um comando começando com `/` que não é nenhum desses (`/foo`) mostra uma
+  mensagem de erro amigável — não trava a tela nem vira uma tarefa.
+- O modo atual (`agente: automático` ou `agente: claude (forçado)`, e
+  `auto: ligado`/`desligado`) fica sempre visível logo abaixo do
+  transcript.
 - Cada tarefa mostra logo abaixo qual agente foi roteado (`→ antigravity`
   ou `→ antigravity → claude`), e o spinner conta os segundos decorridos
   enquanto roda. Antigravity e Claude Code aparecem em cores diferentes e
   consistentes no transcript, pra escanear rápido quem fez o quê.
 
 O que fica de fora da v1 (ver "Limitações" abaixo): sem streaming de output
-ao vivo (mostra spinner até terminar, igual ao modo não-interativo), sem
-rodar várias tarefas em paralelo dentro da tela, e sem `--agent`/`--auto`
-como comandos de barra — pra isso, use `orquestrador run` diretamente.
+ao vivo (mostra spinner até terminar, igual ao modo não-interativo), e sem
+rodar várias tarefas em paralelo dentro da tela — pra isso, use
+`orquestrador run` diretamente.
 
 ### `orquestrador run "<tarefa>"`
 
@@ -249,6 +261,15 @@ resolvedor, cancelamento, falha de agente propagando erro, e `runPipelines`
 lote virando erro pontual, e uma checagem de que a execução é concorrente de
 verdade — tempo total bem abaixo da soma dos delays individuais).
 
+`src/tui/commands.ts` (o parsing de slash command e o estado de modo da
+TUI) também tem testes — é lógica pura, sem depender de renderizar a tela
+de verdade: `/agent claude|antigravity` forçando o agente, `/agent auto`
+resetando pro roteamento normal, `/auto` alternando o estado, os dois
+sendo independentes entre si, e comando desconhecido/argumento inválido
+sempre virando erro (nunca uma tarefa, nunca uma exceção). O resto da TUI
+(`App.tsx`) segue sem teste automatizado — é a mesma decisão já tomada pra
+`promptForAgent`, difícil de testar sem um terminal de verdade.
+
 ## Limitações conhecidas (MVP)
 
 - `planTask` e `classifyTaskWithClaude` avaliam a tarefa inteira; não fazem
@@ -263,9 +284,8 @@ verdade — tempo total bem abaixo da soma dos delays individuais).
 - Sem sintaxe pra forçar um agente diferente por tarefa individual no modo
   de várias tarefas — `--agent`/`--auto` valem pro lote inteiro.
 - Modo interativo (`orquestrador` sem argumentos) não tem streaming de
-  output ao vivo (spinner até terminar, igual ao `run`), não roda tarefas
-  em paralelo dentro da tela, e não tem `/agent`/`/auto` como comandos de
-  barra — só o prompt de ambiguidade existente.
+  output ao vivo (spinner até terminar, igual ao `run`) e não roda tarefas
+  em paralelo dentro da tela — uma tarefa de cada vez, tipo chat.
 - `--dangerously-skip-permissions` do Claude Code nunca é habilitado por
   este projeto.
 

@@ -105,6 +105,18 @@ orquestrador                             # zero args: abre a tela interativa (In
   `ink-text-input`), chamando `runPipeline()` com um `resolveAmbiguousAgent`
   próprio; o resto (`agents/`, `router.ts`, `pipeline.ts`, `storage/`) é
   100% reaproveitado sem alteração.
+- **Parsing de slash command da TUI fica em `src/tui/commands.ts`, separado
+  de `App.tsx`** — é lógica pura (sem Ink/React), então é a parte da TUI
+  que consegue ter teste automatizado de verdade (`commands.test.ts`).
+  `App.tsx` só chama `parseInput()`/`applyModeCommand()` e reage ao
+  resultado; nunca reimplementar essa lógica de decisão inline no
+  componente.
+- **`forcedAgent` e `autoMode` (estado de modo da TUI) são independentes**
+  — `/agent claude` liga um sem mexer no outro, `/auto` liga o outro sem
+  mexer no `forcedAgent`. Mesma prioridade do modo CLI: se `forcedAgent`
+  estiver setado, ele sempre vence (`runPipeline({ forceAgent, auto })` —
+  `forceAgent` tem prioridade sobre `auto` dentro do próprio `pipeline.ts`,
+  não precisa reforçar isso na TUI).
 - **`cli.ts` carrega `src/tui/startTui.tsx` via `import()` dinâmico**, só
   quando invocado sem argumentos — quem usa `run`/`history` não paga o
   custo de carregar Ink/React.
@@ -164,26 +176,34 @@ orquestrador                             # zero args: abre a tela interativa (In
       cabeçalho `=== Tarefa i/N ===` por resultado conforme chegam).
       `printResult`/`printError` foram extraídas em `cli.ts` pra serem
       reaproveitadas pelos dois modos.
-- [x] Testes automatizados com Vitest (24 casos, `src/orchestrator/*.test.ts`):
-  - `router.test.ts` — `planTask` (4 combinações de palavra-chave + case
-    insensitivity) e `classifyTaskWithClaude` (3 classificações possíveis,
-    falha da chamada, resposta inesperada), tudo mockando `runClaudeCode`.
-  - `pipeline.test.ts` — `--agent` forçado, split com handoff de contexto,
-    tarefa ambígua com/sem resolvedor, cancelamento, falha de agente
-    propagando erro e ainda logando/finalizando o run, `--agent` com
-    prioridade sobre `--auto`, `--auto` classificando com sucesso e rodando
-    o plano resultante, `--auto` caindo pro resolvedor quando a
-    classificação falha ou vem inesperada, e `runPipelines` (mapeamento
-    tarefa → resultado, falha parcial isolada, tarefa ambígua no lote
-    virando erro pontual, e uma checagem de concorrência real com margem
-    de tolerância de `1.5x` o maior delay individual pra não ficar flaky).
+- [x] Testes automatizados com Vitest (38 casos):
+  - `src/orchestrator/router.test.ts` — `planTask` (4 combinações de
+    palavra-chave + case insensitivity) e `classifyTaskWithClaude` (3
+    classificações possíveis, falha da chamada, resposta inesperada), tudo
+    mockando `runClaudeCode`.
+  - `src/orchestrator/pipeline.test.ts` — `--agent` forçado, split com
+    handoff de contexto, tarefa ambígua com/sem resolvedor, cancelamento,
+    falha de agente propagando erro e ainda logando/finalizando o run,
+    `--agent` com prioridade sobre `--auto`, `--auto` classificando com
+    sucesso e rodando o plano resultante, `--auto` caindo pro resolvedor
+    quando a classificação falha ou vem inesperada, e `runPipelines`
+    (mapeamento tarefa → resultado, falha parcial isolada, tarefa ambígua
+    no lote virando erro pontual, e uma checagem de concorrência real com
+    margem de tolerância de `1.5x` o maior delay individual pra não ficar
+    flaky).
+  - `src/tui/commands.test.ts` — `parseInput` (task vs. cada slash command,
+    case insensitivity, `/agent` com argumento inválido/ausente vira erro,
+    comando desconhecido vira erro) e `applyModeCommand` (`/agent`
+    mudando `forcedAgent`, `/agent auto` resetando pra `null` mantendo o
+    resto do estado, `/auto` alternando `autoMode` duas vezes, comandos
+    que não mexem no modo deixando o estado intacto, e os dois campos
+    sendo independentes entre si).
 - [x] Tela interativa (`src/tui/App.tsx` + `src/tui/startTui.tsx`, Ink/React):
       `orquestrador` sem argumentos abre um transcript rolável tipo chat —
       digita tarefa, roda via `runPipeline()`, mostra spinner e resultado;
       `/history` (via `listRuns()`), `/exit`/`/quit`, `Ctrl+C` (padrão do
       Ink). Prompt de ambiguidade reimplementado em React (não usa
-      `readline`, incompatível com o raw mode do Ink). Sem testes
-      automatizados (mesma decisão já tomada pra `promptForAgent`).
+      `readline`, incompatível com o raw mode do Ink).
       Acabamento visual: banner de boas-vindas (dentro do `<Static>`, só
       renderiza uma vez), caixa com borda no input (muda de cor durante a
       execução), contador de segundos decorridos junto do spinner, prévia
@@ -191,6 +211,17 @@ orquestrador                             # zero args: abre a tela interativa (In
       `→ antigravity → claude`), e nomes de agente coloridos de forma
       consistente (`agentColor()`: antigravity=azul, claude=magenta) tanto
       na prévia de rota quanto no resultado.
+- [x] Slash commands `/agent` e `/auto` na TUI (`src/tui/commands.ts`):
+      `/agent claude|antigravity` seta `forcedAgent` (equivalente ao
+      `--agent` do CLI, aplicado às próximas tarefas até trocar de novo);
+      `/agent auto` reseta `forcedAgent` pra `null` (volta ao roteamento
+      normal); `/auto` alterna `autoMode` (equivalente ao `--auto` do CLI).
+      Os dois são independentes (`ModeState { forcedAgent, autoMode }`).
+      Comando `/xxx` desconhecido, ou `/agent` com argumento inválido/
+      ausente, retorna um erro amigável (`kind: "error"`) — nunca vira
+      tarefa, nunca derruba a tela. Modo atual sempre visível numa
+      `StatusLine` logo abaixo do transcript (`agente: automático` /
+      `agente: claude (forçado)`, `auto: ligado`/`desligado`).
 
 Testado manualmente (chamando `agy`/`claude` reais do PATH, histórico de
 teste sempre limpo depois):
@@ -223,6 +254,15 @@ teste sempre limpo depois):
   renderizando só uma vez (`grep -c` no log da sessão), e `/exit` saindo
   limpo (`exitstatus: 0`) esperando a tarefa terminar de verdade antes de
   digitar o próximo comando.
+- Slash commands via PTY real: `/foobar` (comando desconhecido) mostrou
+  erro amigável sem quebrar a tela; `/agent claude` forçou o agente e
+  atualizou a `StatusLine`; `/agent` sozinho (sem argumento) mostrou a
+  mensagem de uso sem alterar o estado; `/auto` ligou `autoMode` mantendo
+  `forcedAgent` intacto (independência confirmada); `/agent auto` resetou
+  `forcedAgent` mantendo `autoMode` ligado; e uma tarefa sem nenhuma
+  palavra-chave (`"boa tarde, tudo bem?"`) rodou direto no `claude` sem
+  abrir o prompt de ambiguidade, confirmando que `/agent claude` de fato
+  bypassa `planTask`.
 
 Três bugs reais encontrados e corrigidos durante o desenvolvimento:
 
@@ -273,6 +313,6 @@ Três bugs reais encontrados e corrigidos durante o desenvolvimento:
   de várias tarefas — `--agent`/`--auto` valem pro lote inteiro.
 - TUI: sem streaming de output ao vivo (decisão explícita — v1 mantém
   spinner-até-terminar, igual ao `run`); sem rodar tarefas em paralelo
-  dentro da tela; sem `/agent`/`/auto` como comandos de barra.
+  dentro da tela.
 - Sem interface gráfica além da TUI de terminal, sem multi-tenant (fora de
   escopo do MVP).
