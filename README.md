@@ -176,3 +176,7 @@ resolvedor, cancelamento, e falha de agente propagando erro.
 - Execução sequencial, sem paralelismo entre agentes.
 - `--dangerously-skip-permissions` do Claude Code nunca é habilitado por
   este projeto.
+
+## Licença
+
+[MIT](LICENSE)
