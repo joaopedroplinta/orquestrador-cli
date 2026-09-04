@@ -1,5 +1,9 @@
 # orquestrador-cli
 
+[![CI](https://github.com/joaopedroplinta/orquestrador-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/joaopedroplinta/orquestrador-cli/actions/workflows/ci.yml)
+[![Node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](package.json)
+[![License: MIT](https://img.shields.io/github/license/joaopedroplinta/orquestrador-cli)](LICENSE)
+
 CLI em Node.js/TypeScript que orquestra duas ferramentas de IA agentic —
 **Claude Code** (`claude`) e **Antigravity CLI** (`agy`) — numa mesma tarefa.
 Em vez de você decidir na mão qual ferramenta usar pra pesquisar algo e qual
