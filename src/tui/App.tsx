@@ -2,13 +2,15 @@ import { randomUUID } from "node:crypto";
 import { Box, Static, Text, useApp } from "ink";
 import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
-import { useCallback, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { runPipeline } from "../orchestrator/pipeline.js";
+import { planTask } from "../orchestrator/router.js";
 import { listRuns } from "../storage/history.js";
 import { AgentError, PipelineCancelledError, type AgentName, type AgentRunResult } from "../types.js";
 
 type TranscriptEntry =
-  | { kind: "task"; id: string; text: string }
+  | { kind: "banner"; id: string }
+  | { kind: "task"; id: string; text: string; agents: AgentName[] }
   | { kind: "result"; id: string; steps: AgentRunResult[] }
   | { kind: "error"; id: string; message: string }
   | { kind: "cancelled"; id: string; message: string }
@@ -21,18 +23,45 @@ interface PendingAgentPrompt {
   resolve: (agent: AgentName | null) => void;
 }
 
-const HELP_TEXT =
-  'Digite uma tarefa e aperte Enter. Comandos: "/history" (lista execuções), "/exit" ou "/quit" (sai). Ctrl+C também sai.';
+function agentColor(agent: AgentName): string {
+  return agent === "claude" ? "magenta" : "blue";
+}
+
+function Banner() {
+  return (
+    <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1} marginBottom={1}>
+      <Text bold color="cyan">
+        ⚡ orquestrador
+      </Text>
+      <Text dimColor>Orquestra Claude Code + Antigravity numa mesma tarefa.</Text>
+      <Text dimColor>
+        Digite uma tarefa e aperte Enter. <Text color="green">/history</Text> ·{" "}
+        <Text color="green">/exit</Text> · Ctrl+C
+      </Text>
+    </Box>
+  );
+}
 
 export default function App() {
   const { exit } = useApp();
-  const [transcript, setTranscript] = useState<TranscriptEntry[]>([
-    { kind: "info", id: randomUUID(), text: HELP_TEXT },
-  ]);
+  const [transcript, setTranscript] = useState<TranscriptEntry[]>([{ kind: "banner", id: randomUUID() }]);
   const [input, setInput] = useState("");
   const [status, setStatus] = useState<Status>("idle");
   const [runningTask, setRunningTask] = useState<string | null>(null);
   const [pendingAgentPrompt, setPendingAgentPrompt] = useState<PendingAgentPrompt | undefined>();
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  useEffect(() => {
+    if (status !== "running") {
+      setElapsedSeconds(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const interval = setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [status]);
 
   const addEntry = useCallback((entry: TranscriptEntry) => {
     setTranscript((prev) => [...prev, entry]);
@@ -53,9 +82,10 @@ export default function App() {
 
   const runTask = useCallback(
     async (task: string) => {
+      const agents = planTask(task).map((step) => step.agent);
       setStatus("running");
       setRunningTask(task);
-      addEntry({ kind: "task", id: randomUUID(), text: task });
+      addEntry({ kind: "task", id: randomUUID(), text: task, agents });
 
       try {
         const result = await runPipeline({
@@ -144,7 +174,10 @@ export default function App() {
           <Text color="cyan">
             <Spinner type="dots" />
           </Text>
-          <Text> Rodando: {runningTask}</Text>
+          <Text>
+            {" "}
+            Rodando: {runningTask} <Text dimColor>({elapsedSeconds}s)</Text>
+          </Text>
         </Box>
       )}
 
@@ -155,8 +188,8 @@ export default function App() {
         </Box>
       )}
 
-      <Box marginTop={1}>
-        <Text color="green">{status === "asking-agent" ? "> " : "orquestrador> "}</Text>
+      <Box marginTop={1} borderStyle="round" borderColor={status === "running" ? "gray" : "cyan"} paddingX={1}>
+        <Text color="green">{status === "asking-agent" ? "> " : "❯ "}</Text>
         <TextInput
           value={input}
           onChange={setInput}
@@ -171,13 +204,28 @@ export default function App() {
 
 function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
   switch (entry.kind) {
+    case "banner":
+      return <Banner />;
     case "task":
       return (
-        <Box marginTop={1}>
-          <Text color="green" bold>
-            ›{" "}
-          </Text>
-          <Text>{entry.text}</Text>
+        <Box marginTop={1} flexDirection="column">
+          <Box>
+            <Text color="green" bold>
+              ›{" "}
+            </Text>
+            <Text>{entry.text}</Text>
+          </Box>
+          {entry.agents.length > 0 && (
+            <Text dimColor>
+              {"  → "}
+              {entry.agents.map((agent, i) => (
+                <Fragment key={i}>
+                  {i > 0 && " → "}
+                  <Text color={agentColor(agent)}>{agent}</Text>
+                </Fragment>
+              ))}
+            </Text>
+          )}
         </Box>
       );
     case "result":
@@ -185,7 +233,7 @@ function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
         <Box flexDirection="column">
           {entry.steps.map((step, i) => (
             <Box key={i} flexDirection="column" marginTop={1}>
-              <Text bold>
+              <Text bold color={agentColor(step.agent)}>
                 [{step.agent}] ({step.durationMs}ms)
               </Text>
               <Text>{step.output}</Text>

@@ -108,6 +108,14 @@ orquestrador                             # zero args: abre a tela interativa (In
 - **`cli.ts` carrega `src/tui/startTui.tsx` via `import()` dinâmico**, só
   quando invocado sem argumentos — quem usa `run`/`history` não paga o
   custo de carregar Ink/React.
+- **`render()` da TUI usa `{ incrementalRendering: true }`** (obrigatório,
+  não é só otimização cosmética) — sem isso, o Ink redesenha a árvore
+  inteira a cada tecla; com caixas de borda ocupando a largura toda do
+  terminal, isso gera volume de output grande o bastante pra estourar o
+  buffer do pty em rajadas de digitação rápida (`Error: write EIO`,
+  descoberto testando com PTY real via `pexpect`). Qualquer novo elemento
+  visual "pesado" na TUI (bordas largas, muito texto por frame) deve levar
+  isso em conta.
 - **A partir de agora, trabalho por branch + PR, nunca commit direto na
   `main`.** Toda mudança nova nasce numa branch (`feature/...`), e ao
   terminar abro PR via `gh pr create` pra revisão.
@@ -176,6 +184,13 @@ orquestrador                             # zero args: abre a tela interativa (In
       Ink). Prompt de ambiguidade reimplementado em React (não usa
       `readline`, incompatível com o raw mode do Ink). Sem testes
       automatizados (mesma decisão já tomada pra `promptForAgent`).
+      Acabamento visual: banner de boas-vindas (dentro do `<Static>`, só
+      renderiza uma vez), caixa com borda no input (muda de cor durante a
+      execução), contador de segundos decorridos junto do spinner, prévia
+      do roteamento logo abaixo da tarefa digitada (`→ antigravity` /
+      `→ antigravity → claude`), e nomes de agente coloridos de forma
+      consistente (`agentColor()`: antigravity=azul, claude=magenta) tanto
+      na prévia de rota quanto no resultado.
 
 Testado manualmente (chamando `agy`/`claude` reais do PATH, histórico de
 teste sempre limpo depois):
@@ -202,8 +217,14 @@ teste sempre limpo depois):
   real (`pesquisar ...`) → spinner animando → resultado renderizado com
   `[agente] (Xms)` + output, `/exit` e `Ctrl+C` saindo limpo (raw mode
   desligado, sem lixo no terminal).
+- Depois do acabamento visual + fix de `incrementalRendering`: tarefa real
+  rodando de novo com sucesso (contador de segundos subindo até a
+  conclusão, resultado renderizado corretamente), banner confirmado
+  renderizando só uma vez (`grep -c` no log da sessão), e `/exit` saindo
+  limpo (`exitstatus: 0`) esperando a tarefa terminar de verdade antes de
+  digitar o próximo comando.
 
-Dois bugs reais encontrados e corrigidos durante o desenvolvimento:
+Três bugs reais encontrados e corrigidos durante o desenvolvimento:
 
 1. `rl.question()` sequencial do `node:readline/promises` trava
    indefinidamente quando o stdin é um pipe/não-TTY (a segunda chamada
@@ -221,6 +242,19 @@ Dois bugs reais encontrados e corrigidos durante o desenvolvimento:
    teclas digitadas durante o spinner ficavam acumuladas no campo sem
    feedback e o Enter era descartado silenciosamente, exigindo apertar
    Enter de novo depois. Descoberto testando com PTY real.
+3. Depois de adicionar acabamento visual (banner com borda, caixa de input
+   com borda ocupando a largura toda do terminal), digitação rápida via
+   PTY passou a travar o processo inteiro com `uncaughtException: Error:
+   write EIO`. Causa raiz: sem renderização incremental, o Ink reescreve a
+   árvore inteira a cada tecla; com caixas de borda largas, cada frame
+   gera output grande o bastante pra estourar o buffer do pty quando várias
+   teclas chegam em sequência rápida sem ninguém drenando a saída a tempo.
+   Isolado comparando a versão pré-acabamento (que não reproduzia o mesmo
+   travamento com a mesma técnica de teste) com a versão pós-acabamento, e
+   confirmado via `process.on("uncaughtException")` temporário capturando
+   o stack trace real. Corrigido passando `{ incrementalRendering: true }`
+   pro `render()` em `startTui.tsx` — o Ink passa a atualizar só as linhas
+   que mudaram, reduzindo bastante o volume de bytes por frame.
 
 ## Pendências conhecidas (pós-MVP)
 
