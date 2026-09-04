@@ -30,6 +30,33 @@ Sem `npm link`, rode via `node dist/cli.js <comando>` ou `npm run dev -- <comand
 
 ## Uso
 
+### Modo interativo (`orquestrador`, sem argumentos)
+
+Rodar `orquestrador` sozinho, sem subcomando, abre uma tela interativa
+(construída com [Ink](https://github.com/vadimdemedes/ink), a mesma lib por
+trás da interface do Claude Code): digite uma tarefa, aperte Enter, veja o
+spinner e o resultado aparecerem no transcript, e digite a próxima tarefa
+sem sair do processo — tipo uma conversa.
+
+```bash
+orquestrador
+```
+
+Dentro da tela:
+
+- Cada tarefa digitada roda pela mesma resolução de plano do `run` de uma
+  tarefa só (`planTask` por palavra-chave; se ambígua, aparece um prompt
+  pra escolher `claude`, `antigravity` ou `cancelar`, embutido na própria
+  tela).
+- `/history` — lista as execuções passadas (inclusive as da sessão atual,
+  já que tudo é persistido normalmente em SQLite).
+- `/exit` ou `/quit` — sai. `Ctrl+C` também sai a qualquer momento.
+
+O que fica de fora da v1 (ver "Limitações" abaixo): sem streaming de output
+ao vivo (mostra spinner até terminar, igual ao modo não-interativo), sem
+rodar várias tarefas em paralelo dentro da tela, e sem `--agent`/`--auto`
+como comandos de barra — pra isso, use `orquestrador run` diretamente.
+
 ### `orquestrador run "<tarefa>"`
 
 Roda o fluxo completo pra uma tarefa — ou pra **várias tarefas independentes
@@ -193,7 +220,13 @@ orquestrador history --last
   é o que permite reconstruir a cadeia de handoff depois, via
   `history --last`.
 - **`src/cli.ts`** — entrypoint (`commander`) com os comandos `run` e
-  `history`, spinner (`ora`) e cores (`chalk`).
+  `history`, spinner (`ora`) e cores (`chalk`). Sem argumentos (zero
+  subcomando), importa dinamicamente `src/tui/startTui.tsx` — quem só usa
+  `run`/`history` não paga o custo de carregar Ink/React.
+- **`src/tui/`** — tela interativa em Ink/React (`App.tsx` + `startTui.tsx`).
+  Reaproveita `runPipeline()` e `listRuns()` sem alterar nada neles; tem sua
+  própria versão do prompt de ambiguidade (via estado do React, não
+  `readline`) porque Ink assume o controle do terminal.
 
 ## Testes
 
@@ -225,6 +258,10 @@ verdade — tempo total bem abaixo da soma dos delays individuais).
   há uma dependência real de dados ali, não dá pra paralelizar.
 - Sem sintaxe pra forçar um agente diferente por tarefa individual no modo
   de várias tarefas — `--agent`/`--auto` valem pro lote inteiro.
+- Modo interativo (`orquestrador` sem argumentos) não tem streaming de
+  output ao vivo (spinner até terminar, igual ao `run`), não roda tarefas
+  em paralelo dentro da tela, e não tem `/agent`/`/auto` como comandos de
+  barra — só o prompt de ambiguidade existente.
 - `--dangerously-skip-permissions` do Claude Code nunca é habilitado por
   este projeto.
 

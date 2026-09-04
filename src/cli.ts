@@ -7,6 +7,21 @@ import { runPipeline, runPipelines, type PipelineResult } from "./orchestrator/p
 import { getLastRun, listRuns } from "./storage/history.js";
 import { AgentError, PipelineCancelledError, type AgentName } from "./types.js";
 
+if (process.argv.slice(2).length === 0) {
+  if (!process.stdin.isTTY) {
+    console.error(
+      chalk.red(
+        "Entrada não é interativa (stdin não é um TTY) — não dá pra abrir a tela interativa. " +
+          'Use "orquestrador run <tarefa>" ou "orquestrador history".',
+      ),
+    );
+    process.exit(1);
+  }
+  const { startTui } = await import("./tui/startTui.js");
+  await startTui();
+  process.exit(0);
+}
+
 function printResult(result: PipelineResult): void {
   for (const step of result.steps) {
     console.log(chalk.bold(`\n[${step.agent}] (${step.durationMs}ms)`));
