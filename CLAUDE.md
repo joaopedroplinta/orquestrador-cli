@@ -14,8 +14,10 @@ resultado de um como contexto de entrada pro outro.
 
 Fluxo básico:
 
-1. Usuário roda `orquestrador run "tarefa aqui"`.
-2. Roteamento decide o plano de etapas, nesta ordem de prioridade:
+1. Usuário roda `orquestrador run "tarefa aqui"` (ou várias tarefas de uma
+   vez — `run "tarefa1" "tarefa2"` roda cada uma concorrentemente, ver
+   "Paralelismo" nas convenções abaixo).
+2. Roteamento decide o plano de etapas de cada tarefa, nesta ordem de prioridade:
    `--agent` (força um agente, pula tudo) → `planTask` por palavras-chave →
    `--auto` (classificação leve via `claude`, só se o passo anterior veio
    vazio) → prompt interativo no terminal (só se os anteriores não
@@ -50,6 +52,7 @@ npm link             # expõe o binário `orquestrador` localmente pra testar
 orquestrador run "<tarefa>"              # roda o fluxo completo
 orquestrador run "<tarefa>" --agent claude|antigravity   # força o agente
 orquestrador run "<tarefa>" --auto       # classifica via claude se ambígua
+orquestrador run "<tarefa1>" "<tarefa2>" # roda várias tarefas independentes em paralelo
 orquestrador history                     # lista execuções passadas
 orquestrador history --last              # mostra detalhes da última execução
 ```
@@ -69,7 +72,17 @@ orquestrador history --last              # mostra detalhes da última execução
   controlado — auto-aprova tool calls sem confirmação.
 - **O orquestrador nunca lida com login/credenciais** — assume que `claude`
   e `agy` já estão autenticados na máquina.
-- Execução é **sequencial** no MVP — sem paralelismo entre agentes.
+- **Paralelismo é só entre tarefas top-level independentes**, nunca dentro
+  do handoff de uma mesma tarefa: `runPipelines()` (`src/orchestrator/pipeline.ts`)
+  chama `runPipeline()` uma vez por tarefa via `Promise.allSettled` — cada
+  tarefa gera seu próprio `runId`/steps. Dentro de uma tarefa que gera 2
+  etapas (pesquisa → implementação), a execução continua sequencial porque
+  há dependência real de dados (a segunda precisa do output da primeira).
+  Nunca introduzir paralelismo onde há handoff de contexto.
+- **Modo de várias tarefas não usa o fallback interativo** — não dá pra
+  abrir vários prompts `readline` concorrentes sem confundir qual pergunta
+  é de qual. Uma tarefa ambígua nesse modo vira só um resultado de erro pra
+  ela (via `Promise.allSettled`), sem derrubar as outras tarefas do lote.
 - Sem interface gráfica — só CLI.
 - Sem multi-tenant / múltiplos usuários.
 - **Testes ficam colocados junto do arquivo testado** (`router.test.ts` ao
@@ -102,7 +115,8 @@ orquestrador history --last              # mostra detalhes da última execução
 - [x] Storage/histórico em SQLite (`src/storage/history.ts`), banco em
       `~/.orquestrador/history.db` — cada etapa grava `fed_by_step_id`
       apontando pro id da etapa anterior que alimentou seu contexto.
-- [x] CLI entrypoint (`src/cli.ts`) com `run <tarefa> [--agent] [--auto]` e
+- [x] CLI entrypoint (`src/cli.ts`) com `run <tarefas...> [--agent] [--auto]`
+      (uma tarefa = fluxo normal; várias = paralelo, ver abaixo) e
       `history [--last]` (mostra `#id` de cada etapa e qual a alimentou).
 - [x] Fallback interativo pro roteamento ambíguo: `pipeline.ts` chama
       `resolveAmbiguousAgent` (injetado pelo `cli.ts`), que usa
@@ -118,7 +132,17 @@ orquestrador history --last              # mostra detalhes da última execução
       faria. Se a chamada falhar ou a resposta vier inesperada, cai pro
       fallback interativo existente (ou erro, se também não for TTY).
       `--agent` sempre tem prioridade sobre `--auto`.
-- [x] Testes automatizados com Vitest (20 casos, `src/orchestrator/*.test.ts`):
+- [x] Paralelismo entre tarefas independentes: `runPipelines()`
+      (`src/orchestrator/pipeline.ts`) roda `runPipeline()` uma vez por
+      tarefa via `Promise.allSettled` (nunca `Promise.all` — uma tarefa
+      falhando não pode derrubar as outras). `cli.ts` troca `run <tarefa>`
+      por `run <tarefas...>` (variádico do commander); 1 tarefa = fluxo
+      exatamente igual a antes (spinner, fallback interativo); 2+ tarefas =
+      modo paralelo, sem spinner nem fallback interativo (imprime um
+      cabeçalho `=== Tarefa i/N ===` por resultado conforme chegam).
+      `printResult`/`printError` foram extraídas em `cli.ts` pra serem
+      reaproveitadas pelos dois modos.
+- [x] Testes automatizados com Vitest (24 casos, `src/orchestrator/*.test.ts`):
   - `router.test.ts` — `planTask` (4 combinações de palavra-chave + case
     insensitivity) e `classifyTaskWithClaude` (3 classificações possíveis,
     falha da chamada, resposta inesperada), tudo mockando `runClaudeCode`.
@@ -127,7 +151,10 @@ orquestrador history --last              # mostra detalhes da última execução
     propagando erro e ainda logando/finalizando o run, `--agent` com
     prioridade sobre `--auto`, `--auto` classificando com sucesso e rodando
     o plano resultante, `--auto` caindo pro resolvedor quando a
-    classificação falha ou vem inesperada.
+    classificação falha ou vem inesperada, e `runPipelines` (mapeamento
+    tarefa → resultado, falha parcial isolada, tarefa ambígua no lote
+    virando erro pontual, e uma checagem de concorrência real com margem
+    de tolerância de `1.5x` o maior delay individual pra não ficar flaky).
 
 Testado manualmente (chamando `agy`/`claude` reais do PATH, histórico de
 teste sempre limpo depois):
@@ -142,6 +169,11 @@ teste sempre limpo depois):
   classificação **não** apareceu no histórico.
 - `history`, `history --last`, erro de roteamento ambíguo sem resolvedor,
   `--agent` inválido.
+- `run "<tarefa1>" "<tarefa2>"` com duas tarefas reais roteadas pra agentes
+  diferentes — tempo total ficou perto do maior delay individual (não da
+  soma), confirmando overlap real entre os dois subprocessos; `history`
+  mostrou duas entradas de `run` distintas com timestamps de início quase
+  idênticos (~30ms de diferença).
 
 Bug real encontrado e corrigido durante o desenvolvimento: `rl.question()`
 sequencial do `node:readline/promises` trava indefinidamente quando o stdin
@@ -164,5 +196,6 @@ em `promptForAgent` (`src/cli.ts`).
 - `promptForAgent` (`src/cli.ts`) não tem teste automatizado (readline
   interativo é difícil de testar sem TTY real); a lógica de decisão que ele
   alimenta (`resolveAmbiguousAgent` no pipeline) está coberta.
-- Execução sequencial, sem paralelismo entre agentes (fora de escopo do MVP).
+- Sem sintaxe pra forçar um agente diferente por tarefa individual no modo
+  de várias tarefas — `--agent`/`--auto` valem pro lote inteiro.
 - Sem interface gráfica, sem multi-tenant (fora de escopo do MVP).

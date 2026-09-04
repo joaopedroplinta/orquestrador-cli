@@ -98,3 +98,29 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
   finishRun(runId);
   return { runId, task: options.task, steps };
 }
+
+export interface RunManyOptions {
+  tasks: string[];
+  forceAgent?: AgentName;
+  auto?: boolean;
+}
+
+export interface RunManyResult {
+  task: string;
+  result?: PipelineResult;
+  error?: unknown;
+}
+
+// Tarefas top-level não têm handoff entre si, então rodam concorrentemente;
+// cada uma resolve seu próprio plano e loga seu próprio run/steps normalmente.
+// Sem resolveAmbiguousAgent aqui: várias tarefas não podem disputar o mesmo prompt interativo.
+export async function runPipelines(options: RunManyOptions): Promise<RunManyResult[]> {
+  const settled = await Promise.allSettled(
+    options.tasks.map((task) => runPipeline({ task, forceAgent: options.forceAgent, auto: options.auto })),
+  );
+
+  return settled.map((outcome, i) => {
+    const task = options.tasks[i]!;
+    return outcome.status === "fulfilled" ? { task, result: outcome.value } : { task, error: outcome.reason };
+  });
+}

@@ -12,7 +12,7 @@ vi.mock("../storage/history.js", () => ({
 import { runAntigravity } from "../agents/antigravity.js";
 import { runClaudeCode } from "../agents/claudeCode.js";
 import { finishRun, logStep, startRun } from "../storage/history.js";
-import { runPipeline } from "./pipeline.js";
+import { runPipeline, runPipelines } from "./pipeline.js";
 
 const mockedRunClaudeCode = vi.mocked(runClaudeCode);
 const mockedRunAntigravity = vi.mocked(runAntigravity);
@@ -172,5 +172,70 @@ describe("runPipeline", () => {
     );
 
     expect(resolveAmbiguousAgent).toHaveBeenCalledWith(task);
+  });
+});
+
+describe("runPipelines", () => {
+  it("roda várias tarefas independentes concorrentemente e mantém o mapeamento tarefa -> resultado", async () => {
+    mockedStartRun.mockImplementation((task: string) => `run-${task}`);
+    mockedRunAntigravity.mockResolvedValue(fakeResult("antigravity", "resultado pesquisa"));
+    mockedRunClaudeCode.mockResolvedValue(fakeResult("claude", "resultado implementação"));
+
+    const tasks = ["pesquisar X", "implementar Y"];
+    const results = await runPipelines({ tasks });
+
+    expect(results).toHaveLength(2);
+    expect(results[0]!.task).toBe("pesquisar X");
+    expect(results[0]!.result?.steps[0]?.agent).toBe("antigravity");
+    expect(results[1]!.task).toBe("implementar Y");
+    expect(results[1]!.result?.steps[0]?.agent).toBe("claude");
+    expect(mockedRunAntigravity).toHaveBeenCalledWith({ prompt: "pesquisar X", context: undefined });
+    expect(mockedRunClaudeCode).toHaveBeenCalledWith({ prompt: "implementar Y", context: undefined });
+  });
+
+  it("reporta falha parcial sem afetar a tarefa que teve sucesso", async () => {
+    mockedStartRun.mockImplementation((task: string) => `run-${task}`);
+    mockedRunAntigravity.mockResolvedValue(fakeResult("antigravity", "ok"));
+    const error = new AgentError("claude", "timeout", "excedeu o timeout");
+    mockedRunClaudeCode.mockRejectedValue(error);
+
+    const results = await runPipelines({ tasks: ["pesquisar X", "implementar Y"] });
+
+    expect(results[0]!.error).toBeUndefined();
+    expect(results[0]!.result?.steps).toHaveLength(1);
+    expect(results[1]!.error).toBe(error);
+    expect(results[1]!.result).toBeUndefined();
+    expect(mockedFinishRun).toHaveBeenCalledWith("run-pesquisar X");
+    expect(mockedFinishRun).toHaveBeenCalledWith("run-implementar Y");
+  });
+
+  it("tarefa ambígua no lote vira um resultado de erro, sem derrubar as outras nem abrir um run pra ela", async () => {
+    mockedStartRun.mockImplementation((task: string) => `run-${task}`);
+    mockedRunAntigravity.mockResolvedValue(fakeResult("antigravity", "ok"));
+
+    const results = await runPipelines({ tasks: ["pesquisar X", "boa tarde, tudo bem?"] });
+
+    expect(results[0]!.error).toBeUndefined();
+    expect(results[1]!.error).toBeInstanceOf(Error);
+    expect((results[1]!.error as Error).message).toMatch(/Não foi possível decidir/);
+    expect(mockedStartRun).not.toHaveBeenCalledWith("boa tarde, tudo bem?");
+  });
+
+  it("roda as tarefas de verdade em paralelo, não em sequência", async () => {
+    mockedStartRun.mockImplementation((task: string) => `run-${task}`);
+    const DELAY_MS = 80;
+    mockedRunAntigravity.mockImplementation(
+      () => new Promise((resolve) => setTimeout(() => resolve(fakeResult("antigravity", "ok")), DELAY_MS)),
+    );
+    mockedRunClaudeCode.mockImplementation(
+      () => new Promise((resolve) => setTimeout(() => resolve(fakeResult("claude", "ok")), DELAY_MS)),
+    );
+
+    const start = Date.now();
+    await runPipelines({ tasks: ["pesquisar X", "implementar Y"] });
+    const elapsed = Date.now() - start;
+
+    // margem generosa (1.5x) pra não ficar flaky em CI; sequencial daria ~2x DELAY_MS
+    expect(elapsed).toBeLessThan(DELAY_MS * 1.5);
   });
 });
