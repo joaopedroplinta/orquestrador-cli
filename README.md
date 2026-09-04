@@ -239,10 +239,12 @@ orquestrador history --last
   `history`, spinner (`ora`) e cores (`chalk`). Sem argumentos (zero
   subcomando), importa dinamicamente `src/tui/startTui.tsx` — quem só usa
   `run`/`history` não paga o custo de carregar Ink/React.
-- **`src/tui/`** — tela interativa em Ink/React (`App.tsx` + `startTui.tsx`).
-  Reaproveita `runPipeline()` e `listRuns()` sem alterar nada neles; tem sua
-  própria versão do prompt de ambiguidade (via estado do React, não
-  `readline`) porque Ink assume o controle do terminal.
+- **`src/tui/`** — tela interativa em Ink/React (`App.tsx` + `startTui.tsx`
+  + `commands.ts` + `PromptInput.tsx`). Reaproveita `runPipeline()` e
+  `listRuns()` sem alterar nada neles; tem sua própria versão do prompt de
+  ambiguidade (via estado do React, não `readline`) porque Ink assume o
+  controle do terminal. O input de texto (`PromptInput.tsx`) também é
+  implementação própria, não `ink-text-input` — ver "Testes" abaixo.
 
 ## Testes
 
@@ -274,14 +276,23 @@ sempre virando erro (nunca uma tarefa, nunca uma exceção).
 `runPipeline`/`listRuns` (nunca chama `claude`/`agy`). Cobre: o banner
 aparecendo uma única vez, o fluxo completo de uma tarefa (spinner →
 resultado → input ativo de novo), o prompt de ambiguidade embutido
-(escolher um agente e cancelar), e os slash commands (`/agent`, `/auto`,
+(escolher um agente e cancelar), os slash commands (`/agent`, `/auto`,
 `/history`, comando desconhecido, `/exit`) refletindo na `StatusLine` e no
-transcript. Escrever texto na simulação precisa aguardar um tick entre
-cada caractere — o Ink trata vários caracteres chegando no mesmo instante
-como "colar texto" e perde a semântica de tecla individual (a mesma lição
-aprendida testando com PTY real, documentada no `CLAUDE.md`). `promptForAgent`
-(`src/cli.ts`, o fallback interativo do modo não-TUI) continua sem teste
-automatizado — é `readline` puro, sem a alternativa de um stdin falso.
+transcript, e digitação em rajada sem nenhum caractere perdido (a suíte
+inclui casos escrevendo vários caracteres seguidos, sem esperar entre
+eles, especificamente pra provar isso — ver "input de texto próprio"
+abaixo). `promptForAgent` (`src/cli.ts`, o fallback interativo do modo
+não-TUI) continua sem teste automatizado — é `readline` puro, sem a
+alternativa de um stdin falso.
+
+O input de texto da TUI (`src/tui/PromptInput.tsx`) é implementação
+própria, não a biblioteca `ink-text-input` — ela tinha um bug real de
+perda de caractere em digitação rápida (o cálculo do próximo valor partia
+de uma prop desatualizada quando duas teclas chegavam antes do React
+re-renderizar entre uma e outra). `PromptInput` guarda o valor "de
+verdade" numa `ref`, atualizada de forma síncrona a cada tecla, em vez de
+depender do valor de um render anterior. Ver `CLAUDE.md` (bug #4) pro
+histórico completo.
 
 ## Limitações conhecidas (MVP)
 

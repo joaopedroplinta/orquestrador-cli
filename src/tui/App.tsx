@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { Box, Static, Text, useApp } from "ink";
 import Spinner from "ink-spinner";
-import TextInput from "ink-text-input";
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { runPipeline } from "../orchestrator/pipeline.js";
 import { planTask } from "../orchestrator/router.js";
 import { listRuns } from "../storage/history.js";
 import { AgentError, PipelineCancelledError, type AgentName, type AgentRunResult } from "../types.js";
 import { applyModeCommand, INITIAL_MODE_STATE, parseInput, type ModeState } from "./commands.js";
+import PromptInput from "./PromptInput.js";
 
 type TranscriptEntry =
   | { kind: "banner"; id: string }
@@ -66,7 +66,6 @@ function StatusLine({ mode }: { mode: ModeState }) {
 export default function App() {
   const { exit } = useApp();
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([{ kind: "banner", id: randomUUID() }]);
-  const [input, setInput] = useState("");
   const [status, setStatus] = useState<Status>("idle");
   const [runningTask, setRunningTask] = useState<string | null>(null);
   const [pendingAgentPrompt, setPendingAgentPrompt] = useState<PendingAgentPrompt | undefined>();
@@ -148,7 +147,6 @@ export default function App() {
   const handleSubmit = useCallback(
     (value: string) => {
       const trimmed = value.trim();
-      setInput("");
       if (!trimmed) return;
 
       if (status === "asking-agent" && pendingAgentPrompt) {
@@ -244,12 +242,10 @@ export default function App() {
 
       <Box marginTop={1} borderStyle="round" borderColor={status === "running" ? "gray" : "cyan"} paddingX={1}>
         <Text color="green">{status === "asking-agent" ? "> " : "❯ "}</Text>
-        <TextInput
-          value={input}
-          onChange={setInput}
+        <PromptInput
           onSubmit={handleSubmit}
-          focus={status !== "running"}
-          placeholder={status === "running" ? "" : status === "asking-agent" ? "claude | antigravity | cancelar" : "digite uma tarefa..."}
+          disabled={status === "running"}
+          placeholder={status === "asking-agent" ? "claude | antigravity | cancelar" : "digite uma tarefa..."}
         />
       </Box>
     </Box>

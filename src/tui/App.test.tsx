@@ -213,3 +213,54 @@ describe("App (TUI) — slash commands", () => {
     expect(lastFrame()?.trim()).toBe("");
   });
 });
+
+// Estes testes NÃO usam typeText()/submit() (que aguardam um tick por
+// caractere) de propósito: escrevem tudo em sequência, sem dar tempo pro
+// React re-renderizar entre uma tecla e outra. É o cenário que derrubava
+// caractere com o ink-text-input (o cálculo do próximo valor partia da prop
+// `value` do último render, que ainda não tinha atualizado — ver
+// PromptInput.tsx). Se algum dia esse componente for trocado por outro que
+// reintroduza esse padrão, estes testes devem voltar a falhar.
+describe("App (TUI) — digitação em rajada, sem tick() de proteção entre teclas", () => {
+  it("não perde nenhum caractere", async () => {
+    const { lastFrame, stdin } = render(<App />);
+
+    for (const ch of "pesquisar node") {
+      stdin.write(ch);
+    }
+    await tick();
+
+    expect(lastFrame()).toContain("pesquisar node");
+  });
+
+  it("Enter chegando logo em seguida ainda submete o texto completo (nenhum caractere comido)", async () => {
+    mockedRunPipeline.mockResolvedValue({
+      runId: "run-1",
+      task: "implementar algo",
+      steps: [fakeStep("claude", "feito")],
+    });
+
+    const { stdin } = render(<App />);
+
+    for (const ch of "implementar algo") {
+      stdin.write(ch);
+    }
+    stdin.write("\r");
+    await tick();
+    await tick();
+
+    expect(mockedRunPipeline).toHaveBeenCalledWith(expect.objectContaining({ task: "implementar algo" }));
+  });
+
+  it("um slash command digitado em rajada ainda é reconhecido corretamente", async () => {
+    const { lastFrame, stdin } = render(<App />);
+
+    for (const ch of "/agent claude") {
+      stdin.write(ch);
+    }
+    stdin.write("\r");
+    await tick();
+
+    expect(lastFrame()).toContain("agente: claude (forçado)");
+  });
+});
