@@ -51,6 +51,10 @@ Dentro da tela:
 - `/history` — lista as execuções passadas (inclusive as da sessão atual,
   já que tudo é persistido normalmente em SQLite).
 - `/exit` ou `/quit` — sai. `Ctrl+C` também sai a qualquer momento.
+- Cada tarefa mostra logo abaixo qual agente foi roteado (`→ antigravity`
+  ou `→ antigravity → claude`), e o spinner conta os segundos decorridos
+  enquanto roda. Antigravity e Claude Code aparecem em cores diferentes e
+  consistentes no transcript, pra escanear rápido quem fez o quê.
 
 O que fica de fora da v1 (ver "Limitações" abaixo): sem streaming de output
 ao vivo (mostra spinner até terminar, igual ao modo não-interativo), sem
