@@ -266,9 +266,22 @@ TUI) também tem testes — é lógica pura, sem depender de renderizar a tela
 de verdade: `/agent claude|antigravity` forçando o agente, `/agent auto`
 resetando pro roteamento normal, `/auto` alternando o estado, os dois
 sendo independentes entre si, e comando desconhecido/argumento inválido
-sempre virando erro (nunca uma tarefa, nunca uma exceção). O resto da TUI
-(`App.tsx`) segue sem teste automatizado — é a mesma decisão já tomada pra
-`promptForAgent`, difícil de testar sem um terminal de verdade.
+sempre virando erro (nunca uma tarefa, nunca uma exceção).
+
+`src/tui/App.tsx` (o componente Ink em si) também tem cobertura, via
+[`ink-testing-library`](https://github.com/vadimdemedes/ink-testing-library)
+— renderiza a tela de verdade contra um stdin/stdout falso, mockando
+`runPipeline`/`listRuns` (nunca chama `claude`/`agy`). Cobre: o banner
+aparecendo uma única vez, o fluxo completo de uma tarefa (spinner →
+resultado → input ativo de novo), o prompt de ambiguidade embutido
+(escolher um agente e cancelar), e os slash commands (`/agent`, `/auto`,
+`/history`, comando desconhecido, `/exit`) refletindo na `StatusLine` e no
+transcript. Escrever texto na simulação precisa aguardar um tick entre
+cada caractere — o Ink trata vários caracteres chegando no mesmo instante
+como "colar texto" e perde a semântica de tecla individual (a mesma lição
+aprendida testando com PTY real, documentada no `CLAUDE.md`). `promptForAgent`
+(`src/cli.ts`, o fallback interativo do modo não-TUI) continua sem teste
+automatizado — é `readline` puro, sem a alternativa de um stdin falso.
 
 ## Limitações conhecidas (MVP)
 

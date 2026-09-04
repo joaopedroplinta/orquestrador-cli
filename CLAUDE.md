@@ -38,7 +38,7 @@ Fluxo básico:
 - **Persistência do histórico:** `better-sqlite3`
 - **Output no terminal (modo não-interativo):** `chalk` (cores) + `ora` (spinners)
 - **Tela interativa (`src/tui/`):** `ink` + `react` (`ink-spinner`, `ink-text-input`)
-- **Testes:** `vitest`
+- **Testes:** `vitest` (+ `ink-testing-library` pra renderizar a TUI em teste)
 
 ## Comandos
 
@@ -106,11 +106,17 @@ orquestrador                             # zero args: abre a tela interativa (In
   próprio; o resto (`agents/`, `router.ts`, `pipeline.ts`, `storage/`) é
   100% reaproveitado sem alteração.
 - **Parsing de slash command da TUI fica em `src/tui/commands.ts`, separado
-  de `App.tsx`** — é lógica pura (sem Ink/React), então é a parte da TUI
-  que consegue ter teste automatizado de verdade (`commands.test.ts`).
-  `App.tsx` só chama `parseInput()`/`applyModeCommand()` e reage ao
-  resultado; nunca reimplementar essa lógica de decisão inline no
-  componente.
+  de `App.tsx`** — é lógica pura (sem Ink/React), testada isoladamente em
+  `commands.test.ts`. `App.tsx` só chama `parseInput()`/`applyModeCommand()`
+  e reage ao resultado; nunca reimplementar essa lógica de decisão inline
+  no componente.
+- **`App.tsx` tem cobertura via `ink-testing-library`** (`App.test.tsx`) —
+  renderiza o componente de verdade contra um stdin/stdout falso, mockando
+  `runPipeline`/`listRuns`. Ao simular digitação, cada caractere precisa de
+  um `tick` (`setTimeout(resolve, 0)`) antes do próximo — escrever vários
+  caracteres no stdin falso no mesmo tick reproduz o mesmo bug de "colar
+  texto" que já vimos com PTY real (ver bug #3 abaixo), inclusive perdendo
+  caracteres no meio de uma string digitada rápido demais.
 - **`forcedAgent` e `autoMode` (estado de modo da TUI) são independentes**
   — `/agent claude` liga um sem mexer no outro, `/auto` liga o outro sem
   mexer no `forcedAgent`. Mesma prioridade do modo CLI: se `forcedAgent`
@@ -176,7 +182,7 @@ orquestrador                             # zero args: abre a tela interativa (In
       cabeçalho `=== Tarefa i/N ===` por resultado conforme chegam).
       `printResult`/`printError` foram extraídas em `cli.ts` pra serem
       reaproveitadas pelos dois modos.
-- [x] Testes automatizados com Vitest (38 casos):
+- [x] Testes automatizados com Vitest (49 casos):
   - `src/orchestrator/router.test.ts` — `planTask` (4 combinações de
     palavra-chave + case insensitivity) e `classifyTaskWithClaude` (3
     classificações possíveis, falha da chamada, resposta inesperada), tudo
@@ -198,6 +204,15 @@ orquestrador                             # zero args: abre a tela interativa (In
     resto do estado, `/auto` alternando `autoMode` duas vezes, comandos
     que não mexem no modo deixando o estado intacto, e os dois campos
     sendo independentes entre si).
+  - `src/tui/App.test.tsx` — renderiza `<App />` de verdade via
+    `ink-testing-library` (stdin/stdout falso), mockando `runPipeline` e
+    `listRuns`. Cobre: banner aparecendo uma única vez, fluxo completo de
+    tarefa (spinner → resultado → input ativo de novo, incluindo digitar
+    algo depois pra confirmar que o foco voltou), prompt de ambiguidade
+    embutido (escolher agente e cancelar), e os slash commands (`/agent`,
+    `/auto`, `/agent auto`, `/history` com e sem execuções, comando
+    desconhecido não quebrando a tela, `/exit` encerrando a aplicação)
+    refletindo na `StatusLine` e no transcript.
 - [x] Tela interativa (`src/tui/App.tsx` + `src/tui/startTui.tsx`, Ink/React):
       `orquestrador` sem argumentos abre um transcript rolável tipo chat —
       digita tarefa, roda via `runPipeline()`, mostra spinner e resultado;
