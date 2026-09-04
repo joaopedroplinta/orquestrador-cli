@@ -21,11 +21,16 @@
     "chalk": "^5.3.0",
     "commander": "^12.1.0",
     "execa": "^9.3.0",
-    "ora": "^8.1.0"
+    "ink": "^7.1.1",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
+    "ora": "^8.1.0",
+    "react": "^19.2.8"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.5.0",
+    "@types/react": "^19.2.18",
     "tsx": "^4.19.0",
     "typescript": "^5.5.4",
     "vitest": "^5.0.0"

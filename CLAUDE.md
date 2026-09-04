@@ -36,7 +36,8 @@ Fluxo básico:
 - **CLI framework:** `commander`
 - **Execução de shell:** `execa`
 - **Persistência do histórico:** `better-sqlite3`
-- **Output no terminal:** `chalk` (cores) + `ora` (spinners)
+- **Output no terminal (modo não-interativo):** `chalk` (cores) + `ora` (spinners)
+- **Tela interativa (`src/tui/`):** `ink` + `react` (`ink-spinner`, `ink-text-input`)
 - **Testes:** `vitest`
 
 ## Comandos
@@ -55,6 +56,7 @@ orquestrador run "<tarefa>" --auto       # classifica via claude se ambígua
 orquestrador run "<tarefa1>" "<tarefa2>" # roda várias tarefas independentes em paralelo
 orquestrador history                     # lista execuções passadas
 orquestrador history --last              # mostra detalhes da última execução
+orquestrador                             # zero args: abre a tela interativa (Ink)
 ```
 
 ## Convenções
@@ -97,6 +99,18 @@ orquestrador history --last              # mostra detalhes da última execução
 - **A chamada de classificação do `--auto` (`classifyTaskWithClaude`) não é
   uma etapa do pipeline** — não passa por `logStep`/histórico. Só o plano de
   etapas que ela produz (quando classifica com sucesso) vira etapas reais.
+- **`src/tui/` nunca usa `ora`/`readline`** — Ink assume o controle do
+  terminal (raw mode), e misturar com essas libs corrompe a tela. A TUI
+  reimplementa o prompt de ambiguidade como componente React (estado +
+  `ink-text-input`), chamando `runPipeline()` com um `resolveAmbiguousAgent`
+  próprio; o resto (`agents/`, `router.ts`, `pipeline.ts`, `storage/`) é
+  100% reaproveitado sem alteração.
+- **`cli.ts` carrega `src/tui/startTui.tsx` via `import()` dinâmico**, só
+  quando invocado sem argumentos — quem usa `run`/`history` não paga o
+  custo de carregar Ink/React.
+- **A partir de agora, trabalho por branch + PR, nunca commit direto na
+  `main`.** Toda mudança nova nasce numa branch (`feature/...`), e ao
+  terminar abro PR via `gh pr create` pra revisão.
 
 ## Estado atual — MVP completo
 
@@ -155,6 +169,13 @@ orquestrador history --last              # mostra detalhes da última execução
     tarefa → resultado, falha parcial isolada, tarefa ambígua no lote
     virando erro pontual, e uma checagem de concorrência real com margem
     de tolerância de `1.5x` o maior delay individual pra não ficar flaky).
+- [x] Tela interativa (`src/tui/App.tsx` + `src/tui/startTui.tsx`, Ink/React):
+      `orquestrador` sem argumentos abre um transcript rolável tipo chat —
+      digita tarefa, roda via `runPipeline()`, mostra spinner e resultado;
+      `/history` (via `listRuns()`), `/exit`/`/quit`, `Ctrl+C` (padrão do
+      Ink). Prompt de ambiguidade reimplementado em React (não usa
+      `readline`, incompatível com o raw mode do Ink). Sem testes
+      automatizados (mesma decisão já tomada pra `promptForAgent`).
 
 Testado manualmente (chamando `agy`/`claude` reais do PATH, histórico de
 teste sempre limpo depois):
@@ -174,14 +195,32 @@ teste sempre limpo depois):
   soma), confirmando overlap real entre os dois subprocessos; `history`
   mostrou duas entradas de `run` distintas com timestamps de início quase
   idênticos (~30ms de diferença).
+- TUI (`orquestrador` sem args) testada de ponta a ponta com um PTY real
+  via `pexpect` (Python), digitando caractere a caractere com delay pra
+  simular digitação humana de verdade: `/history` vazio, tarefa ambígua →
+  prompt embutido → escolher "cancelar" → mensagem de cancelamento, tarefa
+  real (`pesquisar ...`) → spinner animando → resultado renderizado com
+  `[agente] (Xms)` + output, `/exit` e `Ctrl+C` saindo limpo (raw mode
+  desligado, sem lixo no terminal).
 
-Bug real encontrado e corrigido durante o desenvolvimento: `rl.question()`
-sequencial do `node:readline/promises` trava indefinidamente quando o stdin
-é um pipe/não-TTY (a segunda chamada nunca resolve se o EOF chega perto da
-primeira — limitação conhecida do Node, não específica deste projeto). Não
-afeta uso interativo real (terminal nunca fecha o stdin), mas travaria
-silenciosamente em CI/scripts. Corrigido com uma guarda `process.stdin.isTTY`
-em `promptForAgent` (`src/cli.ts`).
+Dois bugs reais encontrados e corrigidos durante o desenvolvimento:
+
+1. `rl.question()` sequencial do `node:readline/promises` trava
+   indefinidamente quando o stdin é um pipe/não-TTY (a segunda chamada
+   nunca resolve se o EOF chega perto da primeira — limitação conhecida do
+   Node, não específica deste projeto). Não afeta uso interativo real
+   (terminal nunca fecha o stdin), mas travaria silenciosamente em
+   CI/scripts. Corrigido com uma guarda `process.stdin.isTTY` em
+   `promptForAgent` (`src/cli.ts`).
+2. A TUI (Ink) derrubava o processo com stack trace cru
+   ("Raw mode is not supported...") se `orquestrador` (sem args) fosse
+   invocado com stdin não-TTY. Mesma guarda `process.stdin.isTTY` aplicada
+   antes de chamar `startTui()` em `cli.ts`, com mensagem amigável em vez
+   de crash. Também: enquanto uma tarefa está rodando, o input da TUI
+   precisa ficar com `focus={false}` (prop do `ink-text-input`) — sem isso,
+   teclas digitadas durante o spinner ficavam acumuladas no campo sem
+   feedback e o Enter era descartado silenciosamente, exigindo apertar
+   Enter de novo depois. Descoberto testando com PTY real.
 
 ## Pendências conhecidas (pós-MVP)
 
@@ -198,4 +237,8 @@ em `promptForAgent` (`src/cli.ts`).
   alimenta (`resolveAmbiguousAgent` no pipeline) está coberta.
 - Sem sintaxe pra forçar um agente diferente por tarefa individual no modo
   de várias tarefas — `--agent`/`--auto` valem pro lote inteiro.
-- Sem interface gráfica, sem multi-tenant (fora de escopo do MVP).
+- TUI: sem streaming de output ao vivo (decisão explícita — v1 mantém
+  spinner-até-terminar, igual ao `run`); sem rodar tarefas em paralelo
+  dentro da tela; sem `/agent`/`/auto` como comandos de barra.
+- Sem interface gráfica além da TUI de terminal, sem multi-tenant (fora de
+  escopo do MVP).
