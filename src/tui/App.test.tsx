@@ -240,6 +240,41 @@ describe("App (TUI) — slash commands", () => {
     expect(lastFrame()).toContain("auto: ligado");
   });
 
+  it("/routing classify muda a estratégia e reflete na StatusLine, sem afetar agente/auto", async () => {
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "/agent claude");
+    await submit(stdin, "/routing classify");
+
+    expect(lastFrame()).toContain("Roteamento: classify");
+    expect(lastFrame()).toContain("roteamento: classify");
+    expect(lastFrame()).toContain("agente: claude (forçado)"); // não mexeu no que já estava setado
+  });
+
+  it("/routing com argumento inválido mostra erro amigável, sem mudar o estado", async () => {
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "/routing banana");
+
+    expect(lastFrame()).toContain('Uso: "/routing keyword" ou "/routing classify"');
+    expect(lastFrame()).toContain("roteamento: keyword"); // continua no padrão
+  });
+
+  it("uma tarefa rodada com /routing classify chega em runPipeline com routing: \"classify\"", async () => {
+    let capturedOptions!: RunPipelineOptions;
+    mockedRunPipeline.mockImplementation(
+      (options) => new Promise((resolve) => {
+        capturedOptions = options;
+        resolve({ runId: "run-1", task: options.task, steps: [] });
+      }),
+    );
+
+    const { stdin } = render(<App />);
+    await submit(stdin, "/routing classify");
+    await submit(stdin, "implementar algo");
+    await tick();
+
+    expect(capturedOptions.routing).toBe("classify");
+  });
+
   it("/history lista as execuções passadas", async () => {
     mockedListRuns.mockReturnValue([fakeHistoryRun()]);
 

@@ -20,9 +20,12 @@ Fluxo básico:
 2. Roteamento decide o plano de etapas de cada tarefa, nesta ordem de prioridade:
    `--agent` global (força um agente pro lote inteiro, pula tudo) → prefixo
    `agente:` por tarefa (`"claude: implementar X"` força só aquela tarefa,
-   ver Convenções) → `planTask` por palavras-chave → `--auto` (classificação
-   leve via `claude`, só se o passo anterior veio vazio) → prompt interativo
-   no terminal (só se os anteriores não resolveram) → erro/cancelamento.
+   ver Convenções) → estratégia de roteamento (`--routing`, padrão
+   `"keyword"`): `planTask` por palavras-chave → `--auto` (classificação
+   leve via `claude`, só se a keyword veio vazia) → prompt interativo no
+   terminal (só se os anteriores não resolveram) → erro/cancelamento. Com
+   `--routing=classify`, a classificação via `claude` substitui `planTask`
+   inteiramente (roda sempre, não só como fallback de ambiguidade).
 3. Dispara cada etapa do plano via shell:
    - `agy -p "..." --print-timeout 3m` — Antigravity, pra pesquisa/contexto/web search.
    - `claude -p "..."` — Claude Code, pra implementação/refatoração de código.
@@ -55,7 +58,8 @@ npm link             # expõe o binário `orquestrador` localmente pra testar
 
 orquestrador run "<tarefa>"              # roda o fluxo completo
 orquestrador run "<tarefa>" --agent claude|antigravity   # força o agente
-orquestrador run "<tarefa>" --auto       # classifica via claude se ambígua
+orquestrador run "<tarefa>" --auto       # classifica via claude se ambígua (routing=keyword)
+orquestrador run "<tarefa>" --routing=classify  # classifica TODA tarefa via claude, sem tentar keyword antes
 orquestrador run "<tarefa1>" "<tarefa2>" # roda várias tarefas independentes em paralelo
 orquestrador history                     # lista execuções passadas
 orquestrador history --last              # mostra detalhes da última execução
@@ -154,8 +158,8 @@ orquestrador                             # zero args: abre a tela interativa (In
   confirmado com um probe manual (`spawn` + log de timing dos chunks de
   stdout, ver "Estado atual"): `agy -p` escreve aos poucos conforme gera a
   resposta; `claude -p` entrega tudo num chunk só, no final. A flag
-  `AGENT_STREAMS_INCREMENTALLY` (`types.ts`) registra isso por agente.
-  `runAgentCommand` (`src/agents/shared.ts`) só liga um `onChunk` de
+  `streamsIncrementally` em `AGENT_REGISTRY` (`agents/registry.ts`) registra
+  isso por agente. `runAgentCommand` (`src/agents/shared.ts`) só liga um `onChunk` de
   verdade no stdout do `execa` — não inventa nada. Quem decide *fingir*
   streaming pra um agente que não escreve incremental é
   `simulateStreamingReveal()` em `pipeline.ts`, claramente separada e
@@ -273,9 +277,105 @@ orquestrador                             # zero args: abre a tela interativa (In
   o que vai rodar), então duplica a leitura de `forceAgent ?? prefix.agent
   ?? planTask(...)`, mas nunca decide o agente de verdade; quem decide é
   sempre `runPipeline()`.
+- **Estratégia de roteamento (`RoutingStrategy` em types.ts) é ortogonal à
+  prioridade de agente forçado — só entra em jogo quando não há
+  `forceAgent` (nem global nem por prefixo).** `"keyword"` (padrão) é
+  exatamente o comportamento de sempre: `planTask()` primeiro, `--auto`
+  como fallback pra `classifyTaskWithClaude()` só se a keyword não decidiu
+  nada. `"classify"` **pula `planTask()` inteiramente** — toda tarefa vira
+  uma chamada de classificação, mesmo uma com keyword óbvia (`"implementar
+  X"`) — é uma escolha deliberada, não um fallback: o usuário está dizendo
+  "não confia no roteamento por palavra-chave pra isso, sempre pergunta pro
+  claude". Implementado dentro de `runPipeline()` (não em `runPipelines()`,
+  mesma lógica do prefixo por tarefa) via um `if/else if/else` — nunca um
+  `switch` exaustivo, porque só tem dois ramos reais hoje (`forceAgent` já
+  curto-circuita antes). `--auto`/`/auto` **não tem efeito quando
+  `routing === "classify"`** — a classificação já é sempre a única
+  tentativa, então repeti-la de novo como "fallback" seria uma segunda
+  chamada idêntica e inútil; a UI (CLI e TUI) não impede passar os dois
+  juntos, só documenta que `--auto` fica sem efeito extra nesse caso.
+- **`agents/registry.ts` é a única fonte de verdade de "quais agentes
+  existem de verdade" pro resto do sistema — `pipeline.ts`, `router.ts`,
+  `cli.ts` e a TUI leem de lá em vez de hardcodar `"claude"`/`"antigravity"`
+  nas próprias listas.** `AGENT_REGISTRY: Record<AgentName, AgentDefinition>`
+  substitui o que antes eram DUAS estruturas paralelas mantidas à mão
+  (`RUNNERS` em `pipeline.ts` + `AGENT_STREAMS_INCREMENTALLY` em
+  `types.ts`) — cada `AgentDefinition` já carrega o `runner` (a função que
+  dispara o processo) e o `streamsIncrementally` juntos, então não tem como
+  esquecer de atualizar um sem o outro. `AGENT_NAMES` (array) e
+  `isAgentName()` (type guard) são derivados do registro — `cli.ts`
+  (`--agent`), `commands.ts` (`/agent`) e `router.ts` (prefixo por tarefa)
+  usam esses dois em vez de comparar contra `"claude"`/`"antigravity"`
+  literalmente, então um agente novo passa a ser aceito automaticamente
+  nessas três validações sem tocar nelas. Ver "Adicionando um novo agente"
+  abaixo pro que ainda precisa de edição manual (e por quê).
 - **A partir de agora, trabalho por branch + PR, nunca commit direto na
   `main`.** Toda mudança nova nasce numa branch (`feature/...`), e ao
   terminar abro PR via `gh pr create` pra revisão.
+
+## Adicionando um novo agente
+
+Não tem um terceiro agente implementado hoje — isto é um guia de referência
+pra quando (se) precisar, não uma feature em progresso. A arquitetura foi
+generalizada (PR de roteamento/registro) especificamente pra que os passos
+abaixo sejam a lista completa, sem precisar reabrir `pipeline.ts` nem
+`router.ts` pra fiação nova.
+
+**Passos obrigatórios** (o TypeScript te avisa se esquecer algum destes —
+`Record<AgentName, ...>` em `agents/registry.ts` não compila com uma chave
+faltando):
+
+1. **`src/types.ts`** — adicione o nome na union `AgentName` (ex.:
+   `export type AgentName = "claude" | "antigravity" | "novoagente";`).
+   Único ponto de `types.ts` que precisa mudar.
+2. **`src/agents/novoAgente.ts`** (novo arquivo) — implemente a interface
+   `AgentRunner` (`(options: AgentRunOptions) => Promise<AgentRunResult>`,
+   também em `types.ts`). Copie a forma de `claudeCode.ts`/`antigravity.ts`:
+   monta `prompt` (concatenando `context` quando houver), monta
+   `command`/`args` específicos do CLI novo, e delega tudo pra
+   `runAgentCommand()` (`agents/shared.ts`) — que já cuida de timeout,
+   classificação de erro (`AgentError`/`AgentErrorKind`) e retry com
+   backoff. **Não reimplemente nada disso na mão** — se o novo CLI tiver
+   uma peculiaridade de erro que os outros dois não têm (ex.: um jeito
+   diferente de reportar "sessão expirada"), estenda as heurísticas de
+   `shared.ts` (`looksLikeAuthError`/`looksLikeInvalidArgumentError`) em
+   vez de duplicar a lógica de execução no wrapper novo.
+3. **Meça se o CLI novo escreve stdout de forma incremental de verdade** —
+   um probe manual tipo o que já foi feito pro claude/antigravity (`spawn`
+   + log de timing dos chunks, ver "Estado atual" mais abaixo pro exemplo).
+   **Nunca assuma** — é fácil supor que "todo CLI moderno deve streamar" e
+   estar errado; a diferença real entre `claude -p` (não streama) e
+   `agy -p` (streama) só foi descoberta medindo.
+4. **`src/agents/registry.ts`** — adicione a entrada em `AGENT_REGISTRY`:
+   `{ runner: runNovoAgente, streamsIncrementally: <resultado do passo 3> }`.
+   Isso sozinho já propaga o agente novo pro roteamento por prefixo
+   (`parseTaskAgentPrefix`), pra validação de `--agent`/`/agent`, e pro
+   dispatch de verdade em `runPipeline()` — nenhum desses três precisa de
+   edição.
+
+**Passos que continuam manuais** (são julgamento de produto/UX, não
+boilerplate — não dá pra derivar isso de lugar nenhum):
+
+5. **`src/orchestrator/router.ts`** — se o agente novo deve participar do
+   roteamento por palavra-chave (`planTask`), adicione uma lista de
+   keywords (`NOVOAGENTE_KEYWORDS`) e estenda `buildPlan`/`planTask` pra
+   considerá-la. Isso é uma decisão editorial genuína (que palavras
+   disparam esse agente?), não uma lacuna de arquitetura — é totalmente
+   válido um agente novo ficar de fora do roteamento por keyword e só ser
+   alcançável via `--agent`/prefixo por tarefa/`--routing=classify`
+   (`classifyTaskWithClaude` também precisaria ensinar o claude a
+   considerar essa terceira opção na classificação, já que hoje o prompt
+   de classificação só conhece "pesquisa"/"implementacao"/"ambos").
+6. **`src/tui/App.tsx`** — adicione uma cor em `AGENT_COLORS` (o fallback
+   `"white"` evita crash se você esquecer, mas o agente ficaria sem cor
+   própria na tela, o que é ruim de usar mesmo não sendo um bug).
+7. **Documentação** — `README.md` (tabela de roteamento por palavra-chave,
+   se aplicável) e este arquivo (`CLAUDE.md`, este guia e "Estado atual").
+
+**O que muda sozinho, sem tocar em nada**: validação de `--agent`/`/agent`
+(via `isAgentName`), reconhecimento de `"novoagente:"` como prefixo válido
+por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
+`runPipeline()` (via `AGENT_REGISTRY`).
 
 ## Estado atual — MVP completo
 
@@ -321,7 +421,13 @@ orquestrador                             # zero args: abre a tela interativa (In
       cabeçalho `=== Tarefa i/N ===` por resultado conforme chegam).
       `printResult`/`printError` foram extraídas em `cli.ts` pra serem
       reaproveitadas pelos dois modos.
-- [x] Testes automatizados com Vitest (93 casos):
+- [x] Testes automatizados com Vitest (111 casos):
+  - `src/agents/registry.test.ts` — `AGENT_REGISTRY` tem exatamente as
+    entradas claude/antigravity, cada `runner` aponta pra mesma referência
+    de função do wrapper de verdade (`toBe`, não só `toEqual`),
+    `streamsIncrementally` reflete o probe manual documentado, `AGENT_NAMES`
+    é derivado das chaves do registro, e `isAgentName` reconhece os dois
+    agentes e rejeita nomes desconhecidos/variações de caixa.
   - `src/agents/shared.test.ts` (7 testes) — `runAgentCommand` (retry com
     backoff): sucesso depois de 1 retry (com o `onRetry` recebendo
     `attempt`/`maxRetries`/`delayMs` corretos), sequência completa de
@@ -397,16 +503,29 @@ orquestrador                             # zero args: abre a tela interativa (In
     agente diferente via seu próprio prefixo independente das outras
     (inclusive contrariando a keyword — ex. "antigravity: implementar X"),
     tarefa com prefixo inválido vira erro pontual sem afetar as demais, e
-    `--agent` global sobrescreve o prefixo pro lote inteiro.
+    `--agent` global sobrescreve o prefixo pro lote inteiro; e estratégia de
+    roteamento (6 testes): padrão (`routing` omitido) continua chamando
+    `planTask` primeiro sem nunca classificar, `routing: "classify"` pula
+    `planTask` inteiramente mesmo numa tarefa com keyword óbvia (a
+    classificação vira a primeira chamada, identificada pelo prompt conter
+    "Classifique"), `routing: "classify"` ignora `--auto` (só 2 chamadas ao
+    claude — classificação + etapa real —, nunca 3), `routing: "classify"`
+    com a classificação falhando cai pro resolvedor de ambiguidade igual ao
+    fluxo de keyword, `forceAgent` (global ou prefixo) tem prioridade sobre
+    qualquer `routing`, e `runPipelines` repassa `routing` pra cada tarefa
+    do lote (as duas classificam de verdade, mesmo a que tem keyword óbvia
+    de antigravity — asserção por filtro de conteúdo do prompt, não por
+    ordem de chamada, já que as duas tarefas rodam concorrentemente).
   - `src/tui/commands.test.ts` — `parseInput` (task vs. cada slash command,
-    case insensitivity, `/agent` com argumento inválido/ausente vira erro,
-    comando desconhecido vira erro, `;`-separado com 2+ partes não-vazias
-    virando `{ kind: "tasks" }`, e `;` solto/sobrando no final caindo de
-    volta pro `{ kind: "task" }` original) e `applyModeCommand` (`/agent`
-    mudando `forcedAgent`, `/agent auto` resetando pra `null` mantendo o
-    resto do estado, `/auto` alternando `autoMode` duas vezes, comandos
-    que não mexem no modo deixando o estado intacto, e os dois campos
-    sendo independentes entre si).
+    case insensitivity, `/agent`/`/routing` com argumento inválido/ausente
+    virando erro, comando desconhecido vira erro, `;`-separado com 2+
+    partes não-vazias virando `{ kind: "tasks" }`, e `;` solto/sobrando no
+    final caindo de volta pro `{ kind: "task" }` original) e
+    `applyModeCommand` (`/agent` mudando `forcedAgent`, `/agent auto`
+    resetando pra `null` mantendo o resto do estado, `/auto` alternando
+    `autoMode` duas vezes, `/routing classify` mudando a estratégia mantendo
+    o resto do estado, comandos que não mexem no modo deixando o estado
+    intacto, e os três campos sendo independentes entre si).
   - `src/tui/App.test.tsx` — renderiza `<App />` de verdade via
     `ink-testing-library` (stdin/stdout falso), mockando `runPipeline` e
     `listRuns`. Cobre: banner aparecendo uma única vez, fluxo completo de
@@ -435,7 +554,12 @@ orquestrador                             # zero args: abre a tela interativa (In
     de prefixo de agente (`previewAgents()`): a prévia de rota (`→ agente`)
     de uma tarefa única respeitando o prefixo mesmo contrariando a
     keyword, e duas tarefas do mesmo lote com prefixos diferentes (mesma
-    keyword nas duas) mostrando a prévia certa cada uma.
+    keyword nas duas) mostrando a prévia certa cada uma; mais 3 testes de
+    `/routing`: muda a estratégia e reflete na `StatusLine` sem afetar
+    `forcedAgent`/`autoMode` já setados, argumento inválido mostra erro
+    amigável sem alterar o estado (continua em "keyword"), e uma tarefa
+    rodada depois de `/routing classify` chega em `runPipeline` com
+    `routing: "classify"` de verdade (não só na exibição).
 - [x] Tela interativa (`src/tui/App.tsx` + `src/tui/startTui.tsx`, Ink/React):
       `orquestrador` sem argumentos abre um transcript rolável tipo chat —
       digita tarefa, roda via `runPipeline()`, mostra spinner e resultado;
@@ -460,9 +584,10 @@ orquestrador                             # zero args: abre a tela interativa (In
       tarefa, nunca derruba a tela. Modo atual sempre visível numa
       `StatusLine` logo abaixo do transcript (`agente: automático` /
       `agente: claude (forçado)`, `auto: ligado`/`desligado`).
-- [x] Streaming de output ao vivo na TUI. `AGENT_STREAMS_INCREMENTALLY`
-      (`types.ts`) registra, por agente, se o CLI subjacente escreve stdout
-      de forma incremental — confirmado com um probe manual (`node:child_process.spawn`
+- [x] Streaming de output ao vivo na TUI. `streamsIncrementally` em
+      `AGENT_REGISTRY` (`agents/registry.ts`) registra, por agente, se o
+      CLI subjacente escreve stdout de forma incremental — confirmado com
+      um probe manual (`node:child_process.spawn`
       + log de timestamp de cada chunk de stdout, ver arquivo de sessão
       descartável em `/tmp`, não versionado):
       - `agy -p`: **streaming real** — numa resposta longa, o stdout chegou
@@ -482,8 +607,8 @@ orquestrador                             # zero args: abre a tela interativa (In
       500ms fixos (não escala com o tamanho do texto, pra não *atrasar*
       artificialmente uma resposta longa) — **isso não é streaming de
       verdade**, é só um efeito visual, e o código deixa isso explícito
-      (nome da função, comentário, e a flag `AGENT_STREAMS_INCREMENTALLY`
-      controlando qual caminho roda). `onStepComplete` também faz cada
+      (nome da função, comentário, e o `streamsIncrementally` do
+      `AGENT_REGISTRY` controlando qual caminho roda). `onStepComplete` também faz cada
       etapa virar uma entrada do transcript assim que ela termina — não
       espera o plano inteiro (pesquisa → implementação) terminar pra
       mostrar o resultado da primeira etapa. `App.tsx` mostra um indicador
@@ -542,6 +667,33 @@ orquestrador                             # zero args: abre a tela interativa (In
       `Error` comum antes de `startRun()`/qualquer chamada de agente —
       dentro de um lote, vira só mais um resultado de erro pontual via
       `Promise.allSettled`, sem tratamento especial.
+- [x] Estratégia de roteamento configurável (`--routing keyword|classify`,
+      `/routing keyword|classify` na TUI). `"keyword"` é o padrão de sempre
+      (`planTask` primeiro, `--auto` como fallback). `"classify"` promove
+      `classifyTaskWithClaude()` de fallback-de-ambiguidade a estratégia
+      PRIMÁRIA — toda tarefa é classificada via claude, mesmo uma com
+      keyword óbvia, pulando `planTask()` inteiramente. `--auto`/`/auto`
+      não tem efeito extra com `routing="classify"` (evita uma segunda
+      chamada de classificação redundante). Implementado dentro de
+      `runPipeline()`, mesma abordagem do prefixo por tarefa, então
+      `RoutingStrategy` também é aceito em `RunManyOptions.routing` e
+      repassado por `runPipelines()` pra cada tarefa do lote.
+- [x] Arquitetura de agentes generalizada (`src/agents/registry.ts`) pra
+      facilitar adicionar um terceiro agente sem tocar em `pipeline.ts`/
+      `router.ts` — ver "Adicionando um novo agente" acima pro guia
+      completo. `AGENT_REGISTRY` substitui as duas estruturas paralelas que
+      existiam antes (`RUNNERS` hardcoded em `pipeline.ts` +
+      `AGENT_STREAMS_INCREMENTALLY` em `types.ts`) por uma única fonte de
+      verdade tipada (`Record<AgentName, AgentDefinition>` — o TypeScript
+      recusa compilar se faltar uma entrada). `AGENT_NAMES`/`isAgentName()`
+      derivados do registro substituem comparações hardcoded contra
+      `"claude"`/`"antigravity"` em `cli.ts` (`--agent`), `commands.ts`
+      (`/agent`) e `router.ts` (prefixo por tarefa) — as três aceitam um
+      agente novo automaticamente assim que ele entra no registro, sem
+      edição própria. `App.tsx`'s `agentColor()` virou um mapa com
+      fallback neutro (`"white"`) em vez de um ternário de 2 ramos, pra
+      degradar sem crash (mas não sem aviso visual) se um agente novo
+      esquecer de ganhar cor própria.
 
 Testado manualmente (chamando `agy`/`claude` reais do PATH, histórico de
 teste sempre limpo depois):
@@ -644,6 +796,28 @@ teste sempre limpo depois):
   prefixo).` e a segunda tarefa continuou rodando normalmente
   (`exitCode 1` do lote por causa só da primeira, sem derrubar a segunda),
   confirmando isolamento do erro por tarefa.
+- Estratégia de roteamento, com chamadas reais: a mesma tarefa sem NENHUMA
+  keyword (`"descreva rapidamente em uma frase o conceito de recursão"` —
+  confirmado sem bater em nenhuma das listas de `router.ts`) teve
+  comportamento diferente conforme a estratégia. Com o padrão
+  (`--routing` omitido, sem `--auto`, stdin não-TTY): cancelou com "Não
+  consegui identificar automaticamente... Entrada não é interativa" — o
+  comportamento de sempre pra uma tarefa ambígua. Com `--routing=classify`:
+  rodou de ponta a ponta sem erro nenhum, classificou como "ambos" e
+  produziu as duas etapas (antigravity + claude). Confirma que `classify`
+  resolve exatamente o caso que `keyword` não consegue, sem precisar de
+  `--auto` nem de terminal interativo. `--routing=banana` (valor inválido)
+  falhou direto com a mensagem de validação certa, sem chegar a rodar nada.
+- Generalização do registro de agentes: com o registro em produção
+  (`AGENT_REGISTRY`/`AGENT_NAMES`/`isAgentName` substituindo as estruturas
+  antigas), rodei de novo `run "pesquisar rapidamente..."` real (sem
+  `--routing`, sem prefixo) e confirmei que o comportamento — incluindo o
+  streaming real do antigravity e o `(simulando…)` do claude, que dependem
+  de `AGENT_REGISTRY[...].streamsIncrementally` — ficou idêntico a antes da
+  refatoração. A suíte inteira (111 testes, incluindo todos os de streaming/
+  retry/prefixo escritos antes dessa mudança) continuou passando sem
+  nenhuma alteração nos próprios testes de streaming/retry — só o código de
+  produção mudou de onde lê essas informações, não o comportamento.
 
 Quatro bugs reais encontrados e corrigidos durante o desenvolvimento:
 
@@ -733,7 +907,20 @@ Quatro bugs reais encontrados e corrigidos durante o desenvolvimento:
   fixo de pedaços (~24), independente do tamanho real do texto — não
   tentei calibrar isso com base em testes de usabilidade, só um valor que
   pareceu razoável. Se `claude -p` algum dia passar a suportar streaming
-  de verdade em modo não-interativo, `AGENT_STREAMS_INCREMENTALLY.claude`
-  é o único lugar que precisa mudar.
+  de verdade em modo não-interativo, `AGENT_REGISTRY.claude.streamsIncrementally`
+  (`agents/registry.ts`) é o único lugar que precisa mudar.
+- `classifyTaskWithClaude` (`router.ts`) só sabe classificar em três
+  categorias fixas — "pesquisa"/"implementacao"/"ambos", mapeadas
+  hardcoded pra antigravity/claude/os-dois em `buildPlan`. Isso significa
+  que `--routing=classify` **não generaliza sozinho** pra um terceiro
+  agente: adicionar um novo agente ao `AGENT_REGISTRY` não ensina o prompt
+  de classificação a considerá-lo — precisaria reescrever o prompt e
+  `buildPlan` pra uma quarta categoria (ou um esquema diferente de
+  classificação). Documentado também no passo 5 de "Adicionando um novo
+  agente".
+- `--auto`/`/auto` ligado junto com `--routing=classify`/`/routing
+  classify` não avisa que a flag ficou sem efeito (silenciosamente
+  ignorada, não é um erro) — só documentado em prosa (README/CLAUDE.md),
+  não reforçado na UI.
 - Sem interface gráfica além da TUI de terminal, sem multi-tenant (fora de
   escopo do MVP).

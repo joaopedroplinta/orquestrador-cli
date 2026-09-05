@@ -20,8 +20,8 @@ export interface RunAgentCommandOptions {
   /**
    * Chamado com cada pedaço de stdout assim que o processo escreve, antes
    * dele terminar. Só reflete streaming de verdade se o CLI subjacente
-   * também escrever de forma incremental — ver `AGENT_STREAMS_INCREMENTALLY`
-   * em `types.ts`. Não afeta o `output` final devolvido (continua vindo do
+   * também escrever de forma incremental — ver `streamsIncrementally` em
+   * `agents/registry.ts`. Não afeta o `output` final devolvido (continua vindo do
    * buffer completo do `execa`, igual antes).
    */
   onChunk?: (chunk: string) => void;
