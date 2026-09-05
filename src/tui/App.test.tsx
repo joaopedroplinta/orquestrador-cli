@@ -1,16 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../orchestrator/pipeline.js", () => ({ runPipeline: vi.fn() }));
+vi.mock("../orchestrator/pipeline.js", () => ({ runPipeline: vi.fn(), runPipelines: vi.fn() }));
 vi.mock("../storage/history.js", () => ({ listRuns: vi.fn() }));
 
 import { cleanup, render } from "ink-testing-library";
-import type { RunPipelineOptions } from "../orchestrator/pipeline.js";
-import { runPipeline } from "../orchestrator/pipeline.js";
+import type { RunManyOptions, RunPipelineOptions } from "../orchestrator/pipeline.js";
+import { runPipeline, runPipelines } from "../orchestrator/pipeline.js";
 import { listRuns } from "../storage/history.js";
 import { PipelineCancelledError, type AgentName, type AgentRunResult, type HistoryRun } from "../types.js";
 import App from "./App.js";
 
 const mockedRunPipeline = vi.mocked(runPipeline);
+const mockedRunPipelines = vi.mocked(runPipelines);
 const mockedListRuns = vi.mocked(listRuns);
 
 interface FakeStdin {
@@ -309,5 +310,80 @@ describe("App (TUI) — digitação em rajada, sem tick() de proteção entre te
     await tick();
 
     expect(lastFrame()).toContain("agente: claude (forçado)");
+  });
+});
+
+describe("App (TUI) — múltiplas tarefas em paralelo (';')", () => {
+  it("duas tarefas separadas por ';' rodam em paralelo e cada resultado aparece no bloco certo", async () => {
+    let capturedOptions!: RunManyOptions;
+    mockedRunPipelines.mockImplementation(async (options) => {
+      capturedOptions = options;
+      options.onTaskStepComplete?.(0, fakeStep("antigravity", "resultado da pesquisa"));
+      options.onTaskStepComplete?.(1, fakeStep("claude", "resultado da implementação"));
+      return options.tasks.map((task) => ({ task, result: { runId: "r", task, steps: [] } }));
+    });
+
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "pesquisar X; implementar Y");
+    await tick();
+
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("Tarefa 1/2");
+    expect(frame).toContain("pesquisar X");
+    expect(frame).toContain("resultado da pesquisa");
+    expect(frame).toContain("Tarefa 2/2");
+    expect(frame).toContain("implementar Y");
+    expect(frame).toContain("resultado da implementação");
+    expect(capturedOptions.tasks).toEqual(["pesquisar X", "implementar Y"]);
+  });
+
+  it("streaming de duas tarefas concorrentes aparece em blocos separados, sem se misturar", async () => {
+    mockedRunPipelines.mockImplementation(async (options) => {
+      options.onTaskStepStart?.(0, "antigravity");
+      options.onTaskStepStart?.(1, "claude");
+      options.onTaskChunk?.(0, "antigravity", "texto da tarefa um chegando");
+      options.onTaskChunk?.(1, "claude", "texto da tarefa dois, bem diferente");
+      return new Promise(() => {}); // nunca resolve nesse teste -- só interessa o "durante"
+    });
+
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "pesquisar X; implementar Y");
+    await tick();
+
+    const frame = lastFrame() ?? "";
+    // "Tarefa 1/2" aparece 2x (anúncio estático da tarefa + label da caixa ao
+    // vivo) — pega a ÚLTIMA ocorrência de cada uma, que é a seção "ao vivo".
+    const liveTask1Start = frame.lastIndexOf("Tarefa 1/2");
+    const liveTask2Start = frame.indexOf("Tarefa 2/2", liveTask1Start);
+    const task1Section = frame.slice(liveTask1Start, liveTask2Start);
+    const task2Section = frame.slice(liveTask2Start);
+
+    expect(task1Section).toContain("[antigravity]");
+    expect(task1Section).toContain("texto da tarefa um chegando");
+    expect(task1Section).not.toContain("texto da tarefa dois");
+
+    expect(task2Section).toContain("[claude]");
+    expect(task2Section).toContain("(simulando…)");
+    expect(task2Section).toContain("texto da tarefa dois, bem diferente");
+    expect(task2Section).not.toContain("texto da tarefa um");
+  });
+
+  it("tarefa ambígua dentro do lote vira erro reportado, não abre o prompt de escolha", async () => {
+    mockedRunPipelines.mockImplementation(async (options) => {
+      options.onTaskStepComplete?.(0, fakeStep("antigravity", "ok"));
+      return [
+        { task: options.tasks[0]!, result: { runId: "r", task: options.tasks[0]!, steps: [] } },
+        { task: options.tasks[1]!, error: new Error('Não foi possível decidir qual agente usar pra: "boa tarde"') },
+      ];
+    });
+
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "pesquisar X; boa tarde");
+    await tick();
+
+    const frame = lastFrame() ?? "";
+    expect(frame).not.toContain("Não consegui identificar automaticamente"); // nunca abre o prompt embutido
+    expect(frame).toContain("Não foi possível decidir");
+    expect(frame).toContain("digite uma tarefa..."); // input voltou a ficar ativo, não travou esperando resposta
   });
 });

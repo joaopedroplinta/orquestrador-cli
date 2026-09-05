@@ -6,6 +6,22 @@ describe("parseInput", () => {
     expect(parseInput("pesquisar node")).toEqual({ kind: "task", text: "pesquisar node" });
   });
 
+  it("2+ tarefas separadas por ; viram kind: tasks, aparadas", () => {
+    expect(parseInput("pesquisar node ; implementar endpoint")).toEqual({
+      kind: "tasks",
+      texts: ["pesquisar node", "implementar endpoint"],
+    });
+  });
+
+  it("3 tarefas separadas por ; viram kind: tasks com os 3 textos", () => {
+    expect(parseInput("a; b; c")).toEqual({ kind: "tasks", texts: ["a", "b", "c"] });
+  });
+
+  it("; solto (só uma parte não-vazia) cai de volta pro kind: task original", () => {
+    expect(parseInput("pesquisar node;")).toEqual({ kind: "task", text: "pesquisar node;" });
+    expect(parseInput(";")).toEqual({ kind: "task", text: ";" });
+  });
+
   it("/exit e /quit viram exit", () => {
     expect(parseInput("/exit")).toEqual({ kind: "exit" });
     expect(parseInput("/quit")).toEqual({ kind: "exit" });

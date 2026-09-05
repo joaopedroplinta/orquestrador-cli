@@ -78,9 +78,31 @@ Dentro da tela:
   transcript assim que aquela etapa específica termina, sem esperar a
   outra.
 
-O que fica de fora da v1 (ver "Limitações" abaixo): sem rodar várias
-tarefas em paralelo dentro da tela — pra isso, use `orquestrador run`
-diretamente.
+**Múltiplas tarefas em paralelo, na mesma linha:** separe as tarefas por
+`;` e aperte Enter uma vez só:
+
+```
+pesquisar a última versão do Node.js; implementar um endpoint de login
+```
+
+Cada tarefa do lote roda pelo mesmo `runPipelines()` usado pelo
+`orquestrador run "<t1>" "<t2>"` não-interativo — de verdade em paralelo,
+não uma esperando a outra. Na tela, cada tarefa ganha seu próprio bloco
+rotulado `Tarefa i/N`, com o agente roteado e o streaming daquela tarefa
+específica (real ou simulado, com `(simulando…)` quando for o caso)
+aparecendo ali dentro, nunca misturado com o de outra tarefa do lote.
+Assim que uma tarefa do lote termina, o resultado dela vira uma entrada
+do transcript — não espera as outras.
+
+**Tarefa ambígua dentro de um lote vira erro, não abre o prompt de
+escolha** — a mesma regra que já vale pro `run` não-interativo com várias
+tarefas: um prompt interativo não pode ficar esperando resposta pra uma
+tarefa enquanto trava as outras do mesmo lote. A mensagem de erro indica
+`/agent claude` ou `/agent antigravity` (ou reenviar essa tarefa sozinha,
+fora do lote) como saída.
+
+Uma linha sem `;`, ou com só uma parte não-vazia (`;` solto no final, por
+exemplo), continua rodando como uma tarefa única normal.
 
 ### `orquestrador run "<tarefa>"`
 
@@ -258,7 +280,13 @@ orquestrador history --last
   implementação própria, não `ink-text-input` — ver "Testes" abaixo. Pro
   streaming, `App.tsx` passa `onStepStart`/`onChunk`/`onStepComplete` pro
   `runPipeline()` e só acumula o que chega num estado local — a decisão de
-  "é real ou simulado" já vem pronta do pipeline, a tela só exibe.
+  "é real ou simulado" já vem pronta do pipeline, a tela só exibe. Múltiplas
+  tarefas na mesma linha (separadas por `;`) reaproveitam `runPipelines()`
+  (o mesmo usado pelo `run "<t1>" "<t2>"` não-interativo) em vez de uma
+  implementação paralela própria — só passa as versões com índice de
+  tarefa dos três callbacks de streaming (`onTaskStepStart`/`onTaskChunk`/
+  `onTaskStepComplete`), e nunca `resolveAmbiguousAgent` (tarefa ambígua
+  no lote vira erro, não prompt).
 
 ## Testes
 
@@ -279,29 +307,42 @@ verdade — tempo total bem abaixo da soma dos delays individuais), e
 streaming (chunks reais repassados sem passar pela simulação pro agente que
 streama de verdade, a simulação reconstruindo o texto original sem perda
 pro agente que não streama, e cada etapa virando uma entrada de resultado
-assim que ela termina — sem esperar o resto do plano).
+assim que ela termina — sem esperar o resto do plano), e `runPipelines`
+com streaming por índice de tarefa: `onTaskStepStart`/`onTaskChunk`/
+`onTaskStepComplete` chegando com o índice certo pra cada tarefa do lote,
+chunks de duas tarefas concorrentes (uma real via antigravity, outra
+simulada via claude) não se misturando entre si, e tarefa ambígua no lote
+virando erro em vez de abrir prompt mesmo com callbacks de streaming
+presentes.
 
-`src/tui/commands.ts` (o parsing de slash command e o estado de modo da
-TUI) também tem testes — é lógica pura, sem depender de renderizar a tela
-de verdade: `/agent claude|antigravity` forçando o agente, `/agent auto`
-resetando pro roteamento normal, `/auto` alternando o estado, os dois
-sendo independentes entre si, e comando desconhecido/argumento inválido
-sempre virando erro (nunca uma tarefa, nunca uma exceção).
+`src/tui/commands.ts` (o parsing de slash command, o parsing de `;` pra
+múltiplas tarefas, e o estado de modo da TUI) também tem testes — é
+lógica pura, sem depender de renderizar a tela de verdade: `/agent
+claude|antigravity` forçando o agente, `/agent auto` resetando pro
+roteamento normal, `/auto` alternando o estado, os dois sendo
+independentes entre si, comando desconhecido/argumento inválido sempre
+virando erro (nunca uma tarefa, nunca uma exceção), 2+ tarefas separadas
+por `;` virando `{ kind: "tasks" }` com os textos aparados, e `;` solto
+ou sobrando no final caindo de volta pro `{ kind: "task" }` original.
 
 `src/tui/App.tsx` (o componente Ink em si) também tem cobertura, via
 [`ink-testing-library`](https://github.com/vadimdemedes/ink-testing-library)
 — renderiza a tela de verdade contra um stdin/stdout falso, mockando
-`runPipeline`/`listRuns` (nunca chama `claude`/`agy`). Cobre: o banner
-aparecendo uma única vez, o fluxo completo de uma tarefa (spinner →
-resultado → input ativo de novo), o prompt de ambiguidade embutido
-(escolher um agente e cancelar), os slash commands (`/agent`, `/auto`,
-`/history`, comando desconhecido, `/exit`) refletindo na `StatusLine` e no
-transcript, e digitação em rajada sem nenhum caractere perdido (a suíte
-inclui casos escrevendo vários caracteres seguidos, sem esperar entre
-eles, especificamente pra provar isso — ver "input de texto próprio"
-abaixo). `promptForAgent` (`src/cli.ts`, o fallback interativo do modo
-não-TUI) continua sem teste automatizado — é `readline` puro, sem a
-alternativa de um stdin falso.
+`runPipeline`/`runPipelines`/`listRuns` (nunca chama `claude`/`agy`).
+Cobre: o banner aparecendo uma única vez, o fluxo completo de uma tarefa
+(spinner → resultado → input ativo de novo), o prompt de ambiguidade
+embutido (escolher um agente e cancelar), os slash commands (`/agent`,
+`/auto`, `/history`, comando desconhecido, `/exit`) refletindo na
+`StatusLine` e no transcript, digitação em rajada sem nenhum caractere
+perdido (a suíte inclui casos escrevendo vários caracteres seguidos, sem
+esperar entre eles, especificamente pra provar isso — ver "input de texto
+próprio" abaixo), e múltiplas tarefas via `;`: duas tarefas rodando em
+paralelo com cada resultado aparecendo no bloco `Tarefa i/N` certo,
+streaming intercalado de duas fontes aparecendo em caixas ao vivo
+separadas sem misturar, e tarefa ambígua dentro do lote virando erro sem
+nunca abrir o prompt embutido. `promptForAgent` (`src/cli.ts`, o fallback
+interativo do modo não-TUI) continua sem teste automatizado — é
+`readline` puro, sem a alternativa de um stdin falso.
 
 O input de texto da TUI (`src/tui/PromptInput.tsx`) é implementação
 própria, não a biblioteca `ink-text-input` — ela tinha um bug real de
@@ -324,9 +365,9 @@ histórico completo.
   (pesquisa → implementação), a execução continua sequencial por design —
   há uma dependência real de dados ali, não dá pra paralelizar.
 - Sem sintaxe pra forçar um agente diferente por tarefa individual no modo
-  de várias tarefas — `--agent`/`--auto` valem pro lote inteiro.
-- Modo interativo (`orquestrador` sem argumentos) não roda tarefas em
-  paralelo dentro da tela — uma de cada vez, tipo chat.
+  de várias tarefas — `--agent`/`--auto` (CLI) e `/agent`/`/auto` (TUI)
+  valem pro lote inteiro, tanto no `run "<t1>" "<t2>"` quanto no `;` da
+  TUI.
 - O streaming do Claude Code é sempre simulado (`(simulando…)`) — `claude
   -p` não escreve stdout de forma incremental em modo não-interativo,
   então não tem como ter streaming real dele hoje. Se isso mudar no

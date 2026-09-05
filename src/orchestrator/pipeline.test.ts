@@ -309,3 +309,98 @@ describe("runPipelines", () => {
     expect(elapsed).toBeLessThan(DELAY_MS * 1.5);
   });
 });
+
+describe("runPipelines — streaming", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("onTaskStepStart/onTaskChunk/onTaskStepComplete chegam com o índice certo pra cada tarefa", async () => {
+    // claude nunca recebe onChunk de verdade do wrapper (AGENT_STREAMS_INCREMENTALLY.claude
+    // é false) — o chunk dele vem da simulação, disparada só depois do mock resolver.
+    // Por isso task 0 (antigravity) verifica o texto exato do chunk, e task 1 (claude) só
+    // verifica que ALGUM chunk chegou com o índice/agente certos.
+    vi.useFakeTimers();
+    mockedRunAntigravity.mockImplementation(async (opts) => {
+      opts.onChunk?.("antigravity chunk");
+      return fakeResult("antigravity", "resultado pesquisa");
+    });
+    mockedRunClaudeCode.mockResolvedValue(fakeResult("claude", "resultado implementação"));
+
+    const starts: Array<[number, string]> = [];
+    const chunks: Array<[number, string, string]> = [];
+    const completes: Array<[number, string]> = [];
+
+    const pending = runPipelines({
+      tasks: ["pesquisar X", "implementar Y"],
+      onTaskStepStart: (index, agent) => starts.push([index, agent]),
+      onTaskChunk: (index, agent, chunk) => chunks.push([index, agent, chunk]),
+      onTaskStepComplete: (index, result) => completes.push([index, result.agent]),
+    });
+    await vi.runAllTimersAsync();
+    await pending;
+
+    expect(starts).toEqual(
+      expect.arrayContaining([
+        [0, "antigravity"],
+        [1, "claude"],
+      ]),
+    );
+    expect(chunks).toContainEqual([0, "antigravity", "antigravity chunk"]);
+    expect(chunks.some(([index, agent]) => index === 1 && agent === "claude")).toBe(true);
+    expect(completes).toEqual(
+      expect.arrayContaining([
+        [0, "antigravity"],
+        [1, "claude"],
+      ]),
+    );
+  });
+
+  it("chunks de duas tarefas concorrentes (uma real, outra simulada) não se misturam", async () => {
+    // Tarefa 0 no antigravity (streaming real, intercalado no tempo via
+    // "await Promise.resolve()" de propósito) e tarefa 1 no claude (simulado,
+    // já que ele não escreve stdout aos poucos) — exatamente o cenário que a
+    // TUI (App.tsx) precisa exibir ao mesmo tempo sem confundir qual é qual.
+    vi.useFakeTimers();
+    mockedRunAntigravity.mockImplementation(async (opts) => {
+      opts.onChunk?.("A1 ");
+      await Promise.resolve();
+      opts.onChunk?.("A2 ");
+      await Promise.resolve();
+      opts.onChunk?.("A3");
+      return fakeResult("antigravity", "A1 A2 A3");
+    });
+    const claudeText = "texto completo do claude, revelado aos poucos só pela simulação, não chunk real";
+    mockedRunClaudeCode.mockResolvedValue(fakeResult("claude", claudeText));
+
+    const chunksByTask: Record<number, string[]> = { 0: [], 1: [] };
+    const pending = runPipelines({
+      tasks: ["pesquisar X", "implementar Y"],
+      onTaskChunk: (index, _agent, chunk) => {
+        chunksByTask[index] = [...(chunksByTask[index] ?? []), chunk];
+      },
+    });
+    await vi.runAllTimersAsync();
+    await pending;
+
+    expect(chunksByTask[0]).toEqual(["A1 ", "A2 ", "A3"]);
+    expect(chunksByTask[1]!.length).toBeGreaterThan(1); // realmente fragmentado pela simulação
+    expect(chunksByTask[1]!.join("")).toBe(claudeText); // sem perda nem mistura com a tarefa 0
+  });
+
+  it("tarefa ambígua no lote continua virando erro em vez de prompt, mesmo com callbacks de streaming presentes", async () => {
+    mockedRunAntigravity.mockResolvedValue(fakeResult("antigravity", "ok"));
+    const onTaskStepStart = vi.fn();
+
+    const results = await runPipelines({
+      tasks: ["pesquisar X", "boa tarde, tudo bem?"],
+      onTaskStepStart,
+    });
+
+    expect(results[1]!.error).toBeInstanceOf(Error);
+    expect((results[1]!.error as Error).message).toMatch(/Não foi possível decidir/);
+    // onStepStart nunca chegou a ser chamado pra essa tarefa (nunca teve plano)
+    expect(onTaskStepStart).toHaveBeenCalledTimes(1);
+    expect(onTaskStepStart).toHaveBeenCalledWith(0, "antigravity");
+  });
+});

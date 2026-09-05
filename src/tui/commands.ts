@@ -2,6 +2,8 @@ import type { AgentName } from "../types.js";
 
 export type ParsedInput =
   | { kind: "task"; text: string }
+  /** 2+ tarefas separadas por ";" na mesma linha — rodam em paralelo via runPipelines. */
+  | { kind: "tasks"; texts: string[] }
   | { kind: "exit" }
   | { kind: "history" }
   | { kind: "set-agent"; agent: AgentName | null }
@@ -13,6 +15,13 @@ export type ParsedInput =
 export function parseInput(raw: string): ParsedInput {
   const trimmed = raw.trim();
   if (!trimmed.startsWith("/")) {
+    const parts = trimmed
+      .split(";")
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0);
+    if (parts.length >= 2) {
+      return { kind: "tasks", texts: parts };
+    }
     return { kind: "task", text: trimmed };
   }
 

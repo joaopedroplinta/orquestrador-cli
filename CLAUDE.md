@@ -208,7 +208,7 @@ orquestrador                             # zero args: abre a tela interativa (In
       cabeçalho `=== Tarefa i/N ===` por resultado conforme chegam).
       `printResult`/`printError` foram extraídas em `cli.ts` pra serem
       reaproveitadas pelos dois modos.
-- [x] Testes automatizados com Vitest (58 casos):
+- [x] Testes automatizados com Vitest (67 casos):
   - `src/orchestrator/router.test.ts` — `planTask` (4 combinações de
     palavra-chave + case insensitivity) e `classifyTaskWithClaude` (3
     classificações possíveis, falha da chamada, resposta inesperada), tudo
@@ -228,10 +228,21 @@ orquestrador                             # zero args: abre a tela interativa (In
     o texto original sem perda/duplicação pro agente que não streama —
     com `vi.useFakeTimers()` pra não esperar os ~500ms de verdade — e
     `onStepComplete` disparando pra uma etapa bem-sucedida mesmo se a
-    etapa seguinte falhar depois).
+    etapa seguinte falhar depois), e `runPipelines` — streaming (3
+    testes, também com `vi.useFakeTimers()`/`vi.runAllTimersAsync()`):
+    `onTaskStepStart`/`onTaskChunk`/`onTaskStepComplete` chegando com o
+    índice certo por tarefa; chunks de duas tarefas concorrentes (uma
+    real via antigravity, outra simulada via claude) intercalados sem se
+    misturar entre si (asserção por reconstrução do texto completo de
+    cada tarefa, não por posição exata de chunk — que é detalhe de
+    implementação da simulação); e tarefa ambígua dentro do lote virando
+    erro em vez de abrir prompt, mesmo com callbacks de streaming
+    presentes.
   - `src/tui/commands.test.ts` — `parseInput` (task vs. cada slash command,
     case insensitivity, `/agent` com argumento inválido/ausente vira erro,
-    comando desconhecido vira erro) e `applyModeCommand` (`/agent`
+    comando desconhecido vira erro, `;`-separado com 2+ partes não-vazias
+    virando `{ kind: "tasks" }`, e `;` solto/sobrando no final caindo de
+    volta pro `{ kind: "task" }` original) e `applyModeCommand` (`/agent`
     mudando `forcedAgent`, `/agent auto` resetando pra `null` mantendo o
     resto do estado, `/auto` alternando `autoMode` duas vezes, comandos
     que não mexem no modo deixando o estado intacto, e os dois campos
@@ -248,10 +259,19 @@ orquestrador                             # zero args: abre a tela interativa (In
     rajada **sem** o `tick()` de proteção usado nos outros testes (nenhum
     caractere perdido, Enter chegando logo em seguida ainda submete o
     texto completo, slash command reconhecido mesmo digitado rápido —
-    ver bug #4 pra entender por que esses testes existem), e 2 testes de
+    ver bug #4 pra entender por que esses testes existem), 2 testes de
     streaming: a caixa ao vivo mostrando `[agente]` + o texto acumulado
     enquanto a etapa roda, e a tag `(simulando…)` aparecendo só quando o
-    agente não streama de verdade.
+    agente não streama de verdade, e (mockando também `runPipelines`) 3
+    testes de múltiplas tarefas via `;`: duas tarefas rodando em paralelo
+    com cada resultado aparecendo no bloco `Tarefa i/N` certo; streaming
+    intercalado de duas fontes (uma real, outra simulada) aparecendo em
+    caixas ao vivo separadas sem misturar texto de uma na outra — usa
+    `lastIndexOf`/`indexOf` a partir dali pra isolar a seção de
+    streaming ao vivo, já que o rótulo `Tarefa 1/2` também aparece antes,
+    na entrada estática de anúncio da tarefa; e uma tarefa ambígua dentro
+    do lote virando erro (nunca abre o prompt embutido, input volta pro
+    placeholder normal em vez de ficar esperando resposta).
 - [x] Tela interativa (`src/tui/App.tsx` + `src/tui/startTui.tsx`, Ink/React):
       `orquestrador` sem argumentos abre um transcript rolável tipo chat —
       digita tarefa, roda via `runPipeline()`, mostra spinner e resultado;
@@ -308,6 +328,42 @@ orquestrador                             # zero args: abre a tela interativa (In
       código. `run`/`runPipelines` (modo não-interativo/paralelo) não
       passam nenhum desses callbacks — comportamento e performance
       inalterados ali.
+- [x] Múltiplas tarefas concorrentes dentro da TUI. Sintaxe: separar as
+      tarefas por `;` na mesma linha (`pesquisar X; implementar Y`) —
+      escolhida em vez de um prefixo tipo `//` porque um prefixo ainda
+      precisaria de um delimitador interno de qualquer forma, então só
+      adicionaria um marcador sem eliminar a necessidade de um separador;
+      `;` é mais simples, mais descobrível, e ecoa a convenção de
+      encadeamento de comandos do shell. Parsing em
+      `src/tui/commands.ts` (`parseInput`): faz `split(";")`, remove
+      partes vazias/só espaço; 2+ partes não-vazias viram
+      `{ kind: "tasks", texts }`, senão cai no comportamento de sempre
+      (`{ kind: "task" }`), preservando a string original — um `;` solto
+      ou sobrando no final não muda nada.
+      Reaproveita `runPipelines()` (já existia, usado pelo `run` não-
+      interativo) em vez de reimplementar execução paralela: ganhou
+      `RunManyOptions.onTaskStepStart/onTaskChunk/onTaskStepComplete`
+      (`src/orchestrator/pipeline.ts`), os mesmos três callbacks de
+      streaming do `runPipeline`, só que com o índice (em `tasks`) da
+      tarefa dona do evento — assim cada tarefa do lote tem seu próprio
+      "canal" de streaming sem precisar de N chamadas separadas a
+      `runPipeline`. **Sem `resolveAmbiguousAgent` em modo paralelo** —
+      mesma regra que já valia pro `run "<tarefa1>" "<tarefa2>"` não-
+      interativo: várias tarefas não podem disputar um único prompt de
+      escolha de agente, então uma tarefa ambígua dentro do lote vira
+      erro pontual daquela tarefa (mensagem "Não foi possível decidir...")
+      em vez de abrir o prompt e travar as outras.
+      `App.tsx`: `runTasksInParallel()` marca cada tarefa do lote com
+      `batch: { index, total }`, adiciona uma entrada "task" no
+      transcript por tarefa assim que o lote começa, e vai commitando
+      resultado/erro por tarefa conforme `runPipelines` resolve cada uma
+      (não espera o lote inteiro terminar pra mostrar a primeira). As
+      caixas de streaming ao vivo (uma por tarefa, lado a lado no
+      transcript enquanto rodam) usam **caracteres de texto puro**
+      (`┌`/`│`) em vez de `Box`/`borderStyle` do Ink — decisão
+      deliberada pra minimizar o volume de bytes por frame, dado o
+      histórico do bug #3 (EIO) e que agora são múltiplos streams
+      (reais e simulados) escrevendo na tela ao mesmo tempo.
 
 Testado manualmente (chamando `agy`/`claude` reais do PATH, histórico de
 teste sempre limpo depois):
@@ -359,6 +415,25 @@ teste sempre limpo depois):
   estressar o cenário que causou o bug #3) não estouraram o buffer do pty.
   Ambos terminaram e saíram limpo. Confirma que `incrementalRendering`
   (bug #3) segura mesmo sob a carga adicional do streaming.
+- Múltiplas tarefas em paralelo na TUI, especificamente validado contra o
+  risco de EIO com **múltiplos streams reais/simulados escrevendo na tela
+  ao mesmo tempo** (o cenário que motivou esse cuidado extra): PTY real
+  rodando um lote de 2 tarefas (`pesquisar ...; implementar ...`, uma
+  antigravity com streaming real + uma claude simulada) e depois um lote
+  de 3 (2 antigravity + 1 claude). Nos dois casos: os blocos ao vivo
+  apareceram lado a lado, cada um com seu próprio rótulo `Tarefa i/N`,
+  agente e (quando aplicável) tag `(simulando…)`; cada resultado foi
+  commitado no transcript assim que a respectiva tarefa terminou, sem
+  esperar as outras (`Tarefa 2/3 · [claude] (15310ms)` aparecendo antes
+  das outras concluírem); **nenhum `EIO`/`uncaughtException` no log da
+  sessão em nenhum dos dois lotes**; input voltou ao estado idle
+  (`digite uma tarefa...`) depois que o lote inteiro terminou. Confirma
+  que a mesma abordagem de renderização incremental que resolveu o bug
+  #3 (`incrementalRendering: true`) segura também com N streams
+  concorrentes, e que a escolha de caracteres de texto puro (em vez de
+  `Box`/`borderStyle`) pras caixas ao vivo por tarefa não foi necessária
+  além da margem de segurança já dada pelo `incrementalRendering`, mas
+  manteve o volume de bytes por frame baixo por precaução.
 
 Quatro bugs reais encontrados e corrigidos durante o desenvolvimento:
 
@@ -431,9 +506,9 @@ Quatro bugs reais encontrados e corrigidos durante o desenvolvimento:
   interativo é difícil de testar sem TTY real); a lógica de decisão que ele
   alimenta (`resolveAmbiguousAgent` no pipeline) está coberta.
 - Sem sintaxe pra forçar um agente diferente por tarefa individual no modo
-  de várias tarefas — `--agent`/`--auto` valem pro lote inteiro.
-- TUI: sem rodar tarefas em paralelo dentro da tela (`run`/`runPipelines`
-  continuam sendo o único jeito de rodar várias tarefas ao mesmo tempo).
+  de várias tarefas — `--agent`/`--auto` (CLI) e `/agent`/`/auto` (TUI)
+  valem pro lote inteiro, tanto no `run "<t1>" "<t2>"` quanto no `;` da
+  TUI.
 - Streaming: `simulateStreamingReveal` usa um tempo fixo (~500ms) e número
   fixo de pedaços (~24), independente do tamanho real do texto — não
   tentei calibrar isso com base em testes de usabilidade, só um valor que
