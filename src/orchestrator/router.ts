@@ -12,6 +12,45 @@ export interface TaskStep {
   prompt: string;
 }
 
+const AGENT_NAMES: readonly AgentName[] = ["claude", "antigravity"];
+
+// Um token isolado (letras/dígitos/hífen/underscore) logo no início da tarefa,
+// seguido de ":" — "claude: implementar X". `\s*` só entre o token e o ":"
+// (nunca dentro do token), então uma frase comum tipo "corrigir bug: o app
+// trava" não bate aqui (o ":" só aparece depois de duas palavras, não logo
+// após a primeira).
+const TASK_AGENT_PREFIX_PATTERN = /^([A-Za-z][A-Za-z0-9_-]*)\s*:\s*/;
+
+export interface ParsedTaskAgentPrefix {
+  /** Agente indicado por um prefixo "claude:"/"antigravity:" válido, se houver. */
+  agent?: AgentName;
+  /**
+   * Texto sem o prefixo (quando houve um prefixo válido) — é isso que vira o
+   * prompt de verdade. Sem prefixo (ou com prefixo inválido), é a tarefa
+   * original, intacta.
+   */
+  text: string;
+  /** Setado quando o texto tinha a cara de um prefixo de agente, mas o nome não bateu com nenhum agente conhecido. */
+  invalidAgentName?: string;
+}
+
+// Sintaxe pra forçar o agente de UMA tarefa dentro de um lote (`;` na TUI ou
+// múltiplos argumentos no `run`) sem precisar de --agent/--auto global pro
+// lote inteiro: "claude: implementar X; antigravity: implementar Y". Sem
+// prefixo, cai no comportamento de sempre (roteamento por keyword/--auto).
+// Usado por `runPipeline()` (pipeline.ts) pra resolução de verdade, e por
+// `App.tsx` (TUI) só pra acertar a prévia de rota mostrada antes de rodar.
+export function parseTaskAgentPrefix(rawTask: string): ParsedTaskAgentPrefix {
+  const match = rawTask.match(TASK_AGENT_PREFIX_PATTERN);
+  if (!match) return { text: rawTask };
+
+  const candidate = match[1]!.toLowerCase();
+  const agent = AGENT_NAMES.find((name) => name === candidate);
+  if (!agent) return { text: rawTask, invalidAgentName: match[1] };
+
+  return { agent, text: rawTask.slice(match[0].length) };
+}
+
 type Classification = "pesquisa" | "implementacao" | "ambos";
 
 function matchesAntigravity(lowered: string): boolean {

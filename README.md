@@ -104,6 +104,11 @@ fora do lote) como saída.
 Uma linha sem `;`, ou com só uma parte não-vazia (`;` solto no final, por
 exemplo), continua rodando como uma tarefa única normal.
 
+**Agente diferente por tarefa dentro do lote:** prefixe qualquer tarefa
+(no `;` ou digitada sozinha) com `claude:`/`antigravity:` — ver "Agente
+por tarefa dentro de um lote" na seção do `run` mais abaixo pra sintaxe,
+prioridade e exemplos completos.
+
 ### Retry automático em erros transitórios
 
 Vale pra qualquer jeito de rodar uma tarefa (`run`, modo interativo,
@@ -213,13 +218,52 @@ Duas diferenças importantes em relação ao modo de uma tarefa só:
   várias tarefas, uma tarefa ambígua que `--auto` não resolveu vira
   simplesmente um erro reportado *só pra ela*, sem derrubar as outras.
 - **`--agent` e `--auto` se aplicam a todas as tarefas do lote igualmente**
-  — não tem sintaxe pra forçar um agente diferente por tarefa individual.
+  — pra forçar um agente diferente por tarefa individual, use o prefixo
+  `agente:` (ver abaixo).
 
 ```bash
 orquestrador run "pesquisar X" "corrigir Y" "implementar Z"
 # roda as três ao mesmo tempo; se "corrigir Y" falhar, "pesquisar X" e
 # "implementar Z" ainda são reportadas normalmente
 ```
+
+#### Agente por tarefa dentro de um lote (`agente:` no início da tarefa)
+
+Prefixe uma tarefa individual com `claude:` ou `antigravity:` (dois pontos
+logo depois do nome) pra forçar o agente **só daquela tarefa**, sem afetar
+as outras do mesmo lote nem precisar de `--agent`/`--auto` global. Vale
+tanto pro `run` com múltiplos argumentos quanto pro `;` da TUI (ver
+"Modo interativo" acima).
+
+```bash
+# Dois agentes codificando em paralelo, cada um numa tarefa diferente —
+# ambas as tarefas têm keyword de implementação, mas o prefixo decide:
+orquestrador run "claude: implementar o endpoint de login" "antigravity: implementar a tela de cadastro"
+```
+
+```
+# mesma ideia na TUI, numa linha só:
+claude: implementar o endpoint de login; antigravity: implementar a tela de cadastro
+```
+
+O prefixo é removido antes do texto virar o prompt de verdade — o agente
+recebe só "implementar o endpoint de login", não "claude: implementar...".
+Sem prefixo, a tarefa continua caindo no roteamento de sempre (palavra-chave
+ou `--auto`).
+
+**Prioridade quando mais de uma coisa tenta decidir o agente:** `--agent`/
+`/agent` **global** (vale pro lote inteiro) > **prefixo por tarefa** >
+roteamento automático (palavra-chave / `--auto`). Ou seja, `--agent` global
+sempre vence, mesmo se alguma tarefa tiver um prefixo diferente:
+
+```bash
+orquestrador run "claude: implementar X" "claude: implementar Y" --agent antigravity
+# → as duas rodam no antigravity mesmo assim — --agent global sobrescreve o prefixo
+```
+
+Nome de agente inválido no formato de prefixo (`foo: implementar algo`) dá
+um erro claro **só pra aquela tarefa** — `Prefixo de agente inválido:
+"foo:"...` — sem derrubar as outras tarefas do lote.
 
 ### `orquestrador history`
 
@@ -334,8 +378,19 @@ Os testes de `router.ts` e `pipeline.ts` mockam os wrappers de agente
 (`src/agents/*.ts`) e o storage — a suíte **nunca chama `claude`/`agy` de
 verdade**. Cobrem: as 4 combinações de roteamento por palavra-chave, as 3
 classificações possíveis do `--auto` (mais falha e resposta inesperada),
-`--agent` forçado, split com handoff de contexto, tarefa ambígua com e sem
-resolvedor, cancelamento, falha de agente propagando erro, `runPipelines`
+`parseTaskAgentPrefix` (prefixo `claude:`/`antigravity:` reconhecido e
+removido do texto, case-insensitive, tolerando espaço antes do `:`, uma
+frase comum com `:` no meio não sendo confundida com prefixo, e nome de
+agente desconhecido no formato de prefixo sinalizado como inválido sem
+alterar o texto), `--agent` forçado, split com handoff de contexto, tarefa
+ambígua com e sem resolvedor, cancelamento, falha de agente propagando
+erro, prefixo por tarefa (`claude:`/`antigravity:`) forçando o agente e
+removendo o prefixo do prompt de verdade, `--agent` global sobrescrevendo
+o prefixo por tarefa, e prefixo com nome de agente inválido lançando erro
+claro sem chamar nenhum agente nem abrir run — no lote (`runPipelines`),
+cada tarefa pode ter seu próprio prefixo independente das outras, e uma
+tarefa com prefixo inválido vira um resultado de erro pontual sem afetar
+as demais. `runPipelines`
 (mapeamento tarefa → resultado, falha parcial isolada, tarefa ambígua no
 lote virando erro pontual, e uma checagem de que a execução é concorrente de
 verdade — tempo total bem abaixo da soma dos delays individuais), e
@@ -390,11 +445,15 @@ embutido (escolher um agente e cancelar), os slash commands (`/agent`,
 `StatusLine` e no transcript, digitação em rajada sem nenhum caractere
 perdido (a suíte inclui casos escrevendo vários caracteres seguidos, sem
 esperar entre eles, especificamente pra provar isso — ver "input de texto
-próprio" abaixo), e múltiplas tarefas via `;`: duas tarefas rodando em
-paralelo com cada resultado aparecendo no bloco `Tarefa i/N` certo,
-streaming intercalado de duas fontes aparecendo em caixas ao vivo
-separadas sem misturar, e tarefa ambígua dentro do lote virando erro sem
-nunca abrir o prompt embutido. `promptForAgent` (`src/cli.ts`, o fallback
+próprio" abaixo), a prévia de rota (`→ agente`) respeitando um prefixo
+`agente:` na tarefa mesmo quando a palavra-chave indicaria outro agente,
+e múltiplas tarefas via `;`: duas tarefas rodando em paralelo com cada
+resultado aparecendo no bloco `Tarefa i/N` certo, streaming intercalado de
+duas fontes aparecendo em caixas ao vivo separadas sem misturar, tarefa
+ambígua dentro do lote virando erro sem nunca abrir o prompt embutido, e
+duas tarefas do mesmo lote com prefixos diferentes mostrando a prévia de
+rota certa cada uma, mesmo com a mesma palavra-chave nas duas.
+`promptForAgent` (`src/cli.ts`, o fallback
 interativo do modo não-TUI) continua sem teste automatizado — é
 `readline` puro, sem a alternativa de um stdin falso.
 
@@ -438,10 +497,13 @@ histórico completo.
   na mesma chamada de `run`); dentro de uma tarefa que gera handoff
   (pesquisa → implementação), a execução continua sequencial por design —
   há uma dependência real de dados ali, não dá pra paralelizar.
-- Sem sintaxe pra forçar um agente diferente por tarefa individual no modo
-  de várias tarefas — `--agent`/`--auto` (CLI) e `/agent`/`/auto` (TUI)
-  valem pro lote inteiro, tanto no `run "<t1>" "<t2>"` quanto no `;` da
-  TUI.
+- O prefixo `agente:` por tarefa (ver "Agente por tarefa dentro de um lote"
+  acima) reconhece só um token único logo no início, seguido de `:` — uma
+  tarefa que legitimamente começa com "palavra: resto" sem ter nada a ver
+  com escolha de agente (ex.: "TODO: revisar X", "obs: lembrar de Y") vai
+  ser interpretada como uma tentativa de prefixo e dar erro de "agente
+  inválido" em vez de rodar normal. Contorno: reformule a tarefa pra não
+  começar exatamente nesse formato, ou use `--agent`/`/agent` global.
 - O streaming do Claude Code é sempre simulado (`(simulando…)`) — `claude
   -p` não escreve stdout de forma incremental em modo não-interativo,
   então não tem como ter streaming real dele hoje. Se isso mudar no

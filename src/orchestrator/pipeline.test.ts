@@ -250,6 +250,94 @@ describe("runPipeline — retry", () => {
   });
 });
 
+describe("runPipeline — prefixo de agente por tarefa (\"claude:\"/\"antigravity:\")", () => {
+  it('prefixo "claude:" força o agente e remove o prefixo do prompt enviado', async () => {
+    mockedRunClaudeCode.mockResolvedValue(fakeResult("claude", "ok"));
+
+    const result = await runPipeline({ task: "claude: pesquisar node, já que tem sinal de pesquisa" });
+
+    expect(mockedRunClaudeCode).toHaveBeenCalledWith({
+      prompt: "pesquisar node, já que tem sinal de pesquisa",
+      context: undefined,
+    });
+    expect(mockedRunAntigravity).not.toHaveBeenCalled();
+    expect(result.task).toBe("pesquisar node, já que tem sinal de pesquisa");
+    expect(mockedStartRun).toHaveBeenCalledWith("pesquisar node, já que tem sinal de pesquisa");
+  });
+
+  it("sem prefixo continua caindo no roteamento normal por palavra-chave", async () => {
+    mockedRunAntigravity.mockResolvedValue(fakeResult("antigravity", "ok"));
+
+    const result = await runPipeline({ task: "pesquisar node" });
+
+    expect(mockedRunAntigravity).toHaveBeenCalledWith({ prompt: "pesquisar node", context: undefined });
+    expect(result.task).toBe("pesquisar node");
+  });
+
+  it("--agent (forceAgent global) tem prioridade sobre o prefixo por tarefa", async () => {
+    mockedRunAntigravity.mockResolvedValue(fakeResult("antigravity", "ok"));
+
+    await runPipeline({ task: "claude: implementar algo", forceAgent: "antigravity" });
+
+    expect(mockedRunAntigravity).toHaveBeenCalledWith({ prompt: "implementar algo", context: undefined });
+    expect(mockedRunClaudeCode).not.toHaveBeenCalled();
+  });
+
+  it("prefixo com nome de agente inválido lança um erro claro, sem chamar nenhum agente nem abrir run", async () => {
+    await expect(runPipeline({ task: "foo: implementar algo" })).rejects.toThrow(
+      /Prefixo de agente inválido: "foo:"/,
+    );
+
+    expect(mockedRunClaudeCode).not.toHaveBeenCalled();
+    expect(mockedRunAntigravity).not.toHaveBeenCalled();
+    expect(mockedStartRun).not.toHaveBeenCalled();
+  });
+});
+
+describe("runPipelines — prefixo de agente por tarefa", () => {
+  it("cada tarefa do lote pode forçar um agente diferente via prefixo, mesmo sem --agent/--auto global", async () => {
+    mockedStartRun.mockImplementation((task: string) => `run-${task}`);
+    mockedRunClaudeCode.mockResolvedValue(fakeResult("claude", "implementação ok"));
+    mockedRunAntigravity.mockResolvedValue(fakeResult("antigravity", "pesquisa ok"));
+
+    const results = await runPipelines({
+      tasks: ["claude: implementar X", "antigravity: implementar Y"],
+    });
+
+    // A segunda tarefa tem keyword de implementação ("implementar"), mas o
+    // prefixo "antigravity:" força o outro agente mesmo assim.
+    expect(mockedRunClaudeCode).toHaveBeenCalledWith({ prompt: "implementar X", context: undefined });
+    expect(mockedRunAntigravity).toHaveBeenCalledWith({ prompt: "implementar Y", context: undefined });
+    expect(results[0]!.result?.steps[0]?.agent).toBe("claude");
+    expect(results[1]!.result?.steps[0]?.agent).toBe("antigravity");
+  });
+
+  it("tarefa com prefixo de agente inválido vira um resultado de erro pontual, sem afetar as outras do lote", async () => {
+    mockedStartRun.mockImplementation((task: string) => `run-${task}`);
+    mockedRunClaudeCode.mockResolvedValue(fakeResult("claude", "ok"));
+
+    const results = await runPipelines({ tasks: ["foo: implementar algo", "claude: implementar outra coisa"] });
+
+    expect(results[0]!.error).toBeInstanceOf(Error);
+    expect((results[0]!.error as Error).message).toMatch(/Prefixo de agente inválido: "foo:"/);
+    expect(results[0]!.result).toBeUndefined();
+    expect(mockedStartRun).not.toHaveBeenCalledWith("run-foo: implementar algo");
+
+    expect(results[1]!.error).toBeUndefined();
+    expect(results[1]!.result?.steps[0]?.agent).toBe("claude");
+  });
+
+  it("--agent global sobrescreve o prefixo por tarefa pro lote inteiro", async () => {
+    mockedStartRun.mockImplementation((task: string) => `run-${task}`);
+    mockedRunAntigravity.mockResolvedValue(fakeResult("antigravity", "ok"));
+
+    await runPipelines({ tasks: ["claude: tarefa 1", "claude: tarefa 2"], forceAgent: "antigravity" });
+
+    expect(mockedRunAntigravity).toHaveBeenCalledTimes(2);
+    expect(mockedRunClaudeCode).not.toHaveBeenCalled();
+  });
+});
+
 describe("runPipeline — streaming", () => {
   afterEach(() => {
     vi.useRealTimers();

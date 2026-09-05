@@ -4,7 +4,7 @@ vi.mock("../agents/claudeCode.js", () => ({ runClaudeCode: vi.fn() }));
 
 import { runClaudeCode } from "../agents/claudeCode.js";
 import type { AgentRunResult } from "../types.js";
-import { classifyTaskWithClaude, planTask } from "./router.js";
+import { classifyTaskWithClaude, parseTaskAgentPrefix, planTask } from "./router.js";
 
 const mockedRunClaudeCode = vi.mocked(runClaudeCode);
 
@@ -49,6 +49,43 @@ describe("planTask", () => {
   it("é case-insensitive na detecção das palavras-chave", () => {
     const task = "IMPLEMENTAR um novo endpoint";
     expect(planTask(task)).toEqual([{ agent: "claude", prompt: task }]);
+  });
+});
+
+describe("parseTaskAgentPrefix", () => {
+  it('reconhece "claude:" e "antigravity:" no início, removendo o prefixo do texto', () => {
+    expect(parseTaskAgentPrefix("claude: implementar um endpoint")).toEqual({
+      agent: "claude",
+      text: "implementar um endpoint",
+    });
+    expect(parseTaskAgentPrefix("antigravity: pesquisar node")).toEqual({
+      agent: "antigravity",
+      text: "pesquisar node",
+    });
+  });
+
+  it("é case-insensitive e tolera espaço antes do ':'", () => {
+    expect(parseTaskAgentPrefix("CLAUDE: implementar X")).toEqual({ agent: "claude", text: "implementar X" });
+    expect(parseTaskAgentPrefix("Antigravity : pesquisar Y")).toEqual({
+      agent: "antigravity",
+      text: "pesquisar Y",
+    });
+  });
+
+  it("sem prefixo, devolve o texto original intacto e nenhum agente", () => {
+    expect(parseTaskAgentPrefix("implementar um endpoint de login")).toEqual({
+      text: "implementar um endpoint de login",
+    });
+  });
+
+  it("frase comum com ':' no meio (não logo após a primeira palavra) não é tratada como prefixo", () => {
+    const task = "corrigir bug: o app trava ao abrir";
+    expect(parseTaskAgentPrefix(task)).toEqual({ text: task });
+  });
+
+  it("nome de agente desconhecido no formato de prefixo é sinalizado como inválido, sem alterar o texto", () => {
+    const task = "foo: implementar algo";
+    expect(parseTaskAgentPrefix(task)).toEqual({ text: task, invalidAgentName: "foo" });
   });
 });
 

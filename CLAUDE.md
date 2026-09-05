@@ -18,10 +18,11 @@ Fluxo básico:
    vez — `run "tarefa1" "tarefa2"` roda cada uma concorrentemente, ver
    "Paralelismo" nas convenções abaixo).
 2. Roteamento decide o plano de etapas de cada tarefa, nesta ordem de prioridade:
-   `--agent` (força um agente, pula tudo) → `planTask` por palavras-chave →
-   `--auto` (classificação leve via `claude`, só se o passo anterior veio
-   vazio) → prompt interativo no terminal (só se os anteriores não
-   resolveram) → erro/cancelamento.
+   `--agent` global (força um agente pro lote inteiro, pula tudo) → prefixo
+   `agente:` por tarefa (`"claude: implementar X"` força só aquela tarefa,
+   ver Convenções) → `planTask` por palavras-chave → `--auto` (classificação
+   leve via `claude`, só se o passo anterior veio vazio) → prompt interativo
+   no terminal (só se os anteriores não resolveram) → erro/cancelamento.
 3. Dispara cada etapa do plano via shell:
    - `agy -p "..." --print-timeout 3m` — Antigravity, pra pesquisa/contexto/web search.
    - `claude -p "..."` — Claude Code, pra implementação/refatoração de código.
@@ -235,6 +236,43 @@ orquestrador                             # zero args: abre a tela interativa (In
   `streamingOutput: ""` no `LiveTask`) antes da próxima tentativa começar —
   senão o output parcial de uma tentativa que falhou ficaria colado no
   início do resultado da tentativa seguinte.
+- **Prefixo `agente:` por tarefa mora em `parseTaskAgentPrefix`
+  (`src/orchestrator/router.ts`), consumido dentro de `runPipeline()`
+  (`pipeline.ts`) — não em `runPipelines()`.** Como `runPipelines` já
+  delega cada tarefa do lote pra uma chamada independente de
+  `runPipeline()`, colocar o parsing ali dentro faz ele "só funcionar"
+  tanto pro `run "<t1>" "<t2>"` quanto pro `;` da TUI quanto pra uma
+  tarefa única digitada sozinha, sem duplicar lógica em três lugares.
+  Regex: `^([A-Za-z][A-Za-z0-9_-]*)\s*:\s*` — só reconhece um token único
+  logo no início seguido de `:` (com `\s*` só entre o token e o `:`, nunca
+  dentro dele), então uma frase comum como "corrigir bug: o app trava" não
+  ativa isso (o `:` só aparece depois de duas palavras). Prioridade,
+  aplicada dentro de `runPipeline()`: `options.forceAgent` (--agent/`/agent`
+  **global**, vale pro lote inteiro) `??` `prefix.agent` (por tarefa) — se
+  nenhum dos dois, cai no `planTask`/`--auto`/resolver de sempre. O prefixo
+  é **sempre** parseado e removido do texto antes de virar prompt/ir pro
+  histórico, mesmo quando `forceAgent` global vai acabar sobrescrevendo o
+  agente escolhido por ele — evita comportamento inconsistente (o mesmo
+  texto de tarefa se comportando diferente, ou vazando o prefixo pro
+  agente, dependendo de flags não relacionadas). Nome de agente
+  desconhecido no formato de prefixo (`"foo: implementar X"`) joga um
+  `Error` comum (mesmo estilo do erro de tarefa ambígua sem resolvedor,
+  não um `AgentError` — não é uma falha de execução do agente, é a tarefa
+  chegando malformada) **antes** de `startRun()`/qualquer chamada de
+  agente — dentro de `runPipelines()`, isso vira só um resultado de erro
+  pontual daquela tarefa via `Promise.allSettled`, igual qualquer outro
+  erro de `runPipeline()`, sem precisar de tratamento especial. **Trade-off
+  aceito conscientemente**: qualquer tarefa que legitimamente comece com
+  "palavra-única: resto" sem relação com escolha de agente (`"TODO: revisar
+  X"`, `"obs: lembrar Y"`) vai ser interpretada como tentativa de prefixo e
+  dar erro de "agente inválido" em vez de rodar normal — documentado como
+  limitação conhecida (README/Pendências), não um bug.
+  `App.tsx` (TUI) tem sua própria cópia dessa prioridade só pra prévia de
+  rota mostrada ANTES do pipeline rodar de verdade (`previewAgents()`) —
+  puramente cosmético/síncrono (não pode chamar `runPipeline` só pra saber
+  o que vai rodar), então duplica a leitura de `forceAgent ?? prefix.agent
+  ?? planTask(...)`, mas nunca decide o agente de verdade; quem decide é
+  sempre `runPipeline()`.
 - **A partir de agora, trabalho por branch + PR, nunca commit direto na
   `main`.** Toda mudança nova nasce numa branch (`feature/...`), e ao
   terminar abro PR via `gh pr create` pra revisão.
@@ -283,7 +321,7 @@ orquestrador                             # zero args: abre a tela interativa (In
       cabeçalho `=== Tarefa i/N ===` por resultado conforme chegam).
       `printResult`/`printError` foram extraídas em `cli.ts` pra serem
       reaproveitadas pelos dois modos.
-- [x] Testes automatizados com Vitest (79 casos):
+- [x] Testes automatizados com Vitest (93 casos):
   - `src/agents/shared.test.ts` (7 testes) — `runAgentCommand` (retry com
     backoff): sucesso depois de 1 retry (com o `onRetry` recebendo
     `attempt`/`maxRetries`/`delayMs` corretos), sequência completa de
@@ -309,9 +347,15 @@ orquestrador                             # zero args: abre a tela interativa (In
     1s, e o tempo total do lote fica perto do delay de uma tarefa sozinha
     (~1s), não da soma das duas — confirma overlap real, não serialização.
   - `src/orchestrator/router.test.ts` — `planTask` (4 combinações de
-    palavra-chave + case insensitivity) e `classifyTaskWithClaude` (3
+    palavra-chave + case insensitivity), `classifyTaskWithClaude` (3
     classificações possíveis, falha da chamada, resposta inesperada), tudo
-    mockando `runClaudeCode`.
+    mockando `runClaudeCode`, e `parseTaskAgentPrefix` (5 testes): prefixo
+    `claude:`/`antigravity:` reconhecido e removido do texto,
+    case-insensitive e tolerando espaço antes do `:`, sem prefixo devolve o
+    texto intacto, uma frase comum com `:` no meio (não logo após a
+    primeira palavra) não é confundida com prefixo, e nome de agente
+    desconhecido no formato de prefixo é sinalizado como inválido sem
+    alterar o texto.
   - `src/orchestrator/pipeline.test.ts` — `--agent` forçado, split com
     handoff de contexto, tarefa ambígua com/sem resolvedor, cancelamento,
     falha de agente propagando erro e ainda logando/finalizando o run,
@@ -343,7 +387,17 @@ orquestrador                             # zero args: abre a tela interativa (In
     repassados pro wrapper já com o agente amarrado quando disparado, erro
     não-elegível (`invalid_argument`) chegando com `retries: undefined`
     (o wrapper nem chegou a tentar de novo), e `onTaskRetry` do lote
-    chegando com o índice certo da tarefa que precisou retentar.
+    chegando com o índice certo da tarefa que precisou retentar; e prefixo
+    de agente por tarefa (7 testes): `"claude: X"` força o agente e remove
+    o prefixo do prompt enviado ao wrapper e do que vira `task`/histórico,
+    sem prefixo continua caindo no roteamento normal por palavra-chave,
+    `--agent` global tem prioridade sobre o prefixo por tarefa, prefixo com
+    nome de agente inválido lança erro claro sem chamar nenhum agente nem
+    abrir run, e no lote (`runPipelines`): cada tarefa pode forçar um
+    agente diferente via seu próprio prefixo independente das outras
+    (inclusive contrariando a keyword — ex. "antigravity: implementar X"),
+    tarefa com prefixo inválido vira erro pontual sem afetar as demais, e
+    `--agent` global sobrescreve o prefixo pro lote inteiro.
   - `src/tui/commands.test.ts` — `parseInput` (task vs. cada slash command,
     case insensitivity, `/agent` com argumento inválido/ausente vira erro,
     comando desconhecido vira erro, `;`-separado com 2+ partes não-vazias
@@ -377,7 +431,11 @@ orquestrador                             # zero args: abre a tela interativa (In
     streaming ao vivo, já que o rótulo `Tarefa 1/2` também aparece antes,
     na entrada estática de anúncio da tarefa; e uma tarefa ambígua dentro
     do lote virando erro (nunca abre o prompt embutido, input volta pro
-    placeholder normal em vez de ficar esperando resposta).
+    placeholder normal em vez de ficar esperando resposta); mais 2 testes
+    de prefixo de agente (`previewAgents()`): a prévia de rota (`→ agente`)
+    de uma tarefa única respeitando o prefixo mesmo contrariando a
+    keyword, e duas tarefas do mesmo lote com prefixos diferentes (mesma
+    keyword nas duas) mostrando a prévia certa cada uma.
 - [x] Tela interativa (`src/tui/App.tsx` + `src/tui/startTui.tsx`, Ink/React):
       `orquestrador` sem argumentos abre um transcript rolável tipo chat —
       digita tarefa, roda via `runPipeline()`, mostra spinner e resultado;
@@ -470,6 +528,20 @@ orquestrador                             # zero args: abre a tela interativa (In
       deliberada pra minimizar o volume de bytes por frame, dado o
       histórico do bug #3 (EIO) e que agora são múltiplos streams
       (reais e simulados) escrevendo na tela ao mesmo tempo.
+- [x] Prefixo `agente:` por tarefa dentro de um lote. Sintaxe:
+      `"claude: implementar X; antigravity: implementar Y"` — o `:` logo
+      após o nome do agente (ver `parseTaskAgentPrefix` em Convenções pro
+      regex exato e o trade-off assumido). Prioridade: `--agent`/`/agent`
+      **global** (vale pro lote inteiro) > prefixo por tarefa >
+      `planTask`/`--auto` de sempre. Implementado dentro de
+      `runPipeline()` (não em `runPipelines()`), então funciona igual pra
+      tarefa única, `run "<t1>" "<t2>"` e `;` da TUI sem duplicar lógica.
+      `App.tsx` ganhou `previewAgents()` só pra prévia de rota (`→ agente`)
+      mostrada antes do pipeline rodar de verdade, respeitando a mesma
+      prioridade. Nome de agente inválido no prefixo (`"foo: X"`) joga um
+      `Error` comum antes de `startRun()`/qualquer chamada de agente —
+      dentro de um lote, vira só mais um resultado de erro pontual via
+      `Promise.allSettled`, sem tratamento especial.
 
 Testado manualmente (chamando `agy`/`claude` reais do PATH, histórico de
 teste sempre limpo depois):
@@ -555,6 +627,23 @@ teste sempre limpo depois):
   validado via os testes automatizados de `shared.test.ts` (mockando
   `execa`) — não dá pra forçar `claude -p`/`agy -p` reais a falhar de
   forma transitória sob demanda pra um teste manual determinístico.
+- Prefixo de agente por tarefa, com chamadas reais a `agy`/`claude`:
+  `run "antigravity: implementar rapidamente, em texto só, um resumo de 1
+  frase sobre recursão" "claude: pesquisar rapidamente, em texto só, uma
+  frase sobre o que é HTTP"` — as duas tarefas têm keyword do agente
+  OPOSTO ("implementar" rotearia pro claude, "pesquisar" pro antigravity
+  por palavra-chave), e o prefixo inverteu isso em ambas: a primeira
+  rodou de fato em `[antigravity]`, a segunda em `[claude]`.
+  `history --last` confirmou que o prompt logado da segunda tarefa é só
+  `"pesquisar rapidamente, em texto só, uma frase sobre o que é HTTP"` —
+  sem o `"claude: "` na frente, confirmando que o prefixo é removido antes
+  de virar prompt/histórico. Prefixo inválido dentro de um lote real:
+  `run "foo: implementar algo" "claude: implementar..."` — a primeira
+  tarefa falhou com `Prefixo de agente inválido: "foo:" em "foo:
+  implementar algo". Use "claude:" ou "antigravity:" (ou nenhum
+  prefixo).` e a segunda tarefa continuou rodando normalmente
+  (`exitCode 1` do lote por causa só da primeira, sem derrubar a segunda),
+  confirmando isolamento do erro por tarefa.
 
 Quatro bugs reais encontrados e corrigidos durante o desenvolvimento:
 
@@ -632,10 +721,14 @@ Quatro bugs reais encontrados e corrigidos durante o desenvolvimento:
 - `promptForAgent` (`src/cli.ts`) não tem teste automatizado (readline
   interativo é difícil de testar sem TTY real); a lógica de decisão que ele
   alimenta (`resolveAmbiguousAgent` no pipeline) está coberta.
-- Sem sintaxe pra forçar um agente diferente por tarefa individual no modo
-  de várias tarefas — `--agent`/`--auto` (CLI) e `/agent`/`/auto` (TUI)
-  valem pro lote inteiro, tanto no `run "<t1>" "<t2>"` quanto no `;` da
-  TUI.
+- O prefixo `agente:` por tarefa (`parseTaskAgentPrefix` em `router.ts`)
+  reconhece qualquer token único seguido de `:` logo no início da tarefa —
+  uma tarefa que legitimamente começa nesse formato sem ter nada a ver com
+  escolha de agente (`"TODO: revisar X"`, `"obs: lembrar Y"`) vai virar
+  erro de "agente inválido" em vez de rodar normal. Trade-off aceito
+  conscientemente (ver Convenções), documentado no README também — não dá
+  pra distinguir "tentativa de prefixo com erro de digitação" de "tarefa
+  que só por acaso começa com uma palavra e dois pontos" sem mais contexto.
 - Streaming: `simulateStreamingReveal` usa um tempo fixo (~500ms) e número
   fixo de pedaços (~24), independente do tamanho real do texto — não
   tentei calibrar isso com base em testes de usabilidade, só um valor que

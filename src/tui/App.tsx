@@ -3,7 +3,7 @@ import { Box, Static, Text, useApp } from "ink";
 import Spinner from "ink-spinner";
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { runPipeline, runPipelines } from "../orchestrator/pipeline.js";
-import { planTask } from "../orchestrator/router.js";
+import { parseTaskAgentPrefix, planTask } from "../orchestrator/router.js";
 import { listRuns } from "../storage/history.js";
 import {
   AGENT_STREAMS_INCREMENTALLY,
@@ -62,6 +62,20 @@ function agentColor(agent: AgentName): string {
 
 function batchPrefix(batch: BatchTag | undefined): string {
   return batch ? `Tarefa ${batch.index}/${batch.total} · ` : "";
+}
+
+// Prévia de rota mostrada assim que a tarefa é digitada, antes do pipeline
+// resolver de verdade — precisa refletir a mesma prioridade de runPipeline()
+// (forceAgent global > prefixo "claude:"/"antigravity:" por tarefa >
+// roteamento por keyword), senão mostraria uma rota diferente da que
+// realmente vai rodar. Prefixo inválido não tenta adivinhar nada (o erro
+// aparece assim que a tarefa rodar de verdade).
+function previewAgents(task: string, forcedAgent: AgentName | null): AgentName[] {
+  if (forcedAgent) return [forcedAgent];
+  const prefix = parseTaskAgentPrefix(task);
+  if (prefix.invalidAgentName) return [];
+  if (prefix.agent) return [prefix.agent];
+  return planTask(prefix.text).map((step) => step.agent);
 }
 
 // Reaproveitado pelo modo de uma tarefa só e pelo modo em lote — sempre a
@@ -156,7 +170,7 @@ export default function App() {
 
   const runTask = useCallback(
     async (task: string) => {
-      const agents = mode.forcedAgent ? [mode.forcedAgent] : planTask(task).map((step) => step.agent);
+      const agents = previewAgents(task, mode.forcedAgent);
       setStatus("running");
       setRunningTask(task);
       addEntry({ kind: "task", id: randomUUID(), text: task, agents });
@@ -226,7 +240,7 @@ export default function App() {
       );
 
       for (const [i, task] of texts.entries()) {
-        const agents = mode.forcedAgent ? [mode.forcedAgent] : planTask(task).map((step) => step.agent);
+        const agents = previewAgents(task, mode.forcedAgent);
         addEntry({ kind: "task", id: randomUUID(), text: task, agents, batch: { index: i + 1, total } });
       }
 

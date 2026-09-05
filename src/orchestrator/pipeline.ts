@@ -10,7 +10,7 @@ import {
   type AgentRunOptions,
   type AgentRunResult,
 } from "../types.js";
-import { classifyTaskWithClaude, planTask, type TaskStep } from "./router.js";
+import { classifyTaskWithClaude, parseTaskAgentPrefix, planTask, type TaskStep } from "./router.js";
 
 const SIMULATED_REVEAL_STEPS = 24;
 const SIMULATED_REVEAL_DURATION_MS = 500;
@@ -74,29 +74,41 @@ const RUNNERS: Record<AgentName, (options: AgentRunOptions) => Promise<AgentRunR
 };
 
 export async function runPipeline(options: RunPipelineOptions): Promise<PipelineResult> {
-  let plan: TaskStep[] = options.forceAgent
-    ? [{ agent: options.forceAgent, prompt: options.task }]
-    : planTask(options.task);
+  // "claude: implementar X" força o agente só dessa tarefa, sem precisar de
+  // --agent/--auto pro lote inteiro (ver parseTaskAgentPrefix em router.ts).
+  // Prioridade: --agent global (options.forceAgent) > prefixo por tarefa >
+  // roteamento automático (planTask/--auto/resolver de ambiguidade).
+  const prefix = parseTaskAgentPrefix(options.task);
+  if (prefix.invalidAgentName) {
+    throw new Error(
+      `Prefixo de agente inválido: "${prefix.invalidAgentName}:" em "${options.task}". Use "claude:" ou "antigravity:" (ou nenhum prefixo).`,
+    );
+  }
+
+  const task = prefix.text;
+  const forceAgent = options.forceAgent ?? prefix.agent;
+
+  let plan: TaskStep[] = forceAgent ? [{ agent: forceAgent, prompt: task }] : planTask(task);
 
   if (plan.length === 0 && options.auto) {
-    plan = (await classifyTaskWithClaude(options.task)) ?? [];
+    plan = (await classifyTaskWithClaude(task)) ?? [];
   }
 
   if (plan.length === 0) {
     if (!options.resolveAmbiguousAgent) {
       throw new Error(
-        `Não foi possível decidir qual agente usar pra: "${options.task}". Especifique com --agent claude|antigravity.`,
+        `Não foi possível decidir qual agente usar pra: "${task}". Especifique com --agent claude|antigravity.`,
       );
     }
 
-    const chosen = await options.resolveAmbiguousAgent(options.task);
+    const chosen = await options.resolveAmbiguousAgent(task);
     if (!chosen) {
-      throw new PipelineCancelledError(options.task);
+      throw new PipelineCancelledError(task);
     }
-    plan = [{ agent: chosen, prompt: options.task }];
+    plan = [{ agent: chosen, prompt: task }];
   }
 
-  const runId = startRun(options.task);
+  const runId = startRun(task);
   const steps: AgentRunResult[] = [];
   let previousOutput: string | undefined;
   let previousStepId: number | undefined;
@@ -143,7 +155,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       const timestamp = new Date().toISOString();
       logStep(runId, {
         agent: error.agent,
-        prompt: options.task,
+        prompt: task,
         output: "",
         startedAt: timestamp,
         finishedAt: timestamp,
@@ -158,7 +170,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
   }
 
   finishRun(runId);
-  return { runId, task: options.task, steps };
+  return { runId, task, steps };
 }
 
 export interface RunManyOptions {
