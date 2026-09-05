@@ -37,8 +37,10 @@ Fluxo básico:
 - **Execução de shell:** `execa`
 - **Persistência do histórico:** `better-sqlite3`
 - **Output no terminal (modo não-interativo):** `chalk` (cores) + `ora` (spinners)
-- **Tela interativa (`src/tui/`):** `ink` + `react` (`ink-spinner`, `ink-text-input`)
-- **Testes:** `vitest`
+- **Tela interativa (`src/tui/`):** `ink` + `react` (`ink-spinner`; o input de
+  texto é próprio — `PromptInput.tsx` — não usa `ink-text-input`, ver
+  Convenções abaixo)
+- **Testes:** `vitest` (+ `ink-testing-library` pra renderizar a TUI em teste)
 
 ## Comandos
 
@@ -102,15 +104,33 @@ orquestrador                             # zero args: abre a tela interativa (In
 - **`src/tui/` nunca usa `ora`/`readline`** — Ink assume o controle do
   terminal (raw mode), e misturar com essas libs corrompe a tela. A TUI
   reimplementa o prompt de ambiguidade como componente React (estado +
-  `ink-text-input`), chamando `runPipeline()` com um `resolveAmbiguousAgent`
+  `PromptInput`), chamando `runPipeline()` com um `resolveAmbiguousAgent`
   próprio; o resto (`agents/`, `router.ts`, `pipeline.ts`, `storage/`) é
   100% reaproveitado sem alteração.
+- **O input de texto da TUI é próprio (`src/tui/PromptInput.tsx`), não
+  `ink-text-input`** — motivo é um bug real de perda de caractere (ver bug
+  #4 abaixo), não preferência estética. **Nunca compute o próximo valor do
+  input a partir de uma prop/estado vindo do último render** (ex.:
+  `value.slice(...) + charDigitado`) — se duas teclas chegarem rápido
+  demais pro React re-renderizar entre uma e outra, o segundo cálculo
+  enxerga um valor desatualizado e descarta a primeira tecla. O valor
+  "de verdade" mora numa `ref` (`valueRef`), mutada de forma síncrona a
+  cada tecla; o `useState` (`display`) existe só pra disparar o
+  re-render, sempre lendo o valor JÁ ATUALIZADO da ref, nunca calculando
+  algo incrementalmente por conta própria. Esse padrão vale pra qualquer
+  handler de teclado futuro na TUI, não só o input de texto.
 - **Parsing de slash command da TUI fica em `src/tui/commands.ts`, separado
-  de `App.tsx`** — é lógica pura (sem Ink/React), então é a parte da TUI
-  que consegue ter teste automatizado de verdade (`commands.test.ts`).
-  `App.tsx` só chama `parseInput()`/`applyModeCommand()` e reage ao
-  resultado; nunca reimplementar essa lógica de decisão inline no
-  componente.
+  de `App.tsx`** — é lógica pura (sem Ink/React), testada isoladamente em
+  `commands.test.ts`. `App.tsx` só chama `parseInput()`/`applyModeCommand()`
+  e reage ao resultado; nunca reimplementar essa lógica de decisão inline
+  no componente.
+- **`App.tsx` tem cobertura via `ink-testing-library`** (`App.test.tsx`) —
+  renderiza o componente de verdade contra um stdin/stdout falso, mockando
+  `runPipeline`/`listRuns`. Ao simular digitação, cada caractere precisa de
+  um `tick` (`setTimeout(resolve, 0)`) antes do próximo — escrever vários
+  caracteres no stdin falso no mesmo tick reproduz o mesmo bug de "colar
+  texto" que já vimos com PTY real (ver bug #3 abaixo), inclusive perdendo
+  caracteres no meio de uma string digitada rápido demais.
 - **`forcedAgent` e `autoMode` (estado de modo da TUI) são independentes**
   — `/agent claude` liga um sem mexer no outro, `/auto` liga o outro sem
   mexer no `forcedAgent`. Mesma prioridade do modo CLI: se `forcedAgent`
@@ -176,7 +196,7 @@ orquestrador                             # zero args: abre a tela interativa (In
       cabeçalho `=== Tarefa i/N ===` por resultado conforme chegam).
       `printResult`/`printError` foram extraídas em `cli.ts` pra serem
       reaproveitadas pelos dois modos.
-- [x] Testes automatizados com Vitest (38 casos):
+- [x] Testes automatizados com Vitest (52 casos):
   - `src/orchestrator/router.test.ts` — `planTask` (4 combinações de
     palavra-chave + case insensitivity) e `classifyTaskWithClaude` (3
     classificações possíveis, falha da chamada, resposta inesperada), tudo
@@ -198,6 +218,19 @@ orquestrador                             # zero args: abre a tela interativa (In
     resto do estado, `/auto` alternando `autoMode` duas vezes, comandos
     que não mexem no modo deixando o estado intacto, e os dois campos
     sendo independentes entre si).
+  - `src/tui/App.test.tsx` — renderiza `<App />` de verdade via
+    `ink-testing-library` (stdin/stdout falso), mockando `runPipeline` e
+    `listRuns`. Cobre: banner aparecendo uma única vez, fluxo completo de
+    tarefa (spinner → resultado → input ativo de novo, incluindo digitar
+    algo depois pra confirmar que o foco voltou), prompt de ambiguidade
+    embutido (escolher agente e cancelar), os slash commands (`/agent`,
+    `/auto`, `/agent auto`, `/history` com e sem execuções, comando
+    desconhecido não quebrando a tela, `/exit` encerrando a aplicação)
+    refletindo na `StatusLine` e no transcript, e 3 testes de digitação em
+    rajada **sem** o `tick()` de proteção usado nos outros testes (nenhum
+    caractere perdido, Enter chegando logo em seguida ainda submete o
+    texto completo, slash command reconhecido mesmo digitado rápido) —
+    ver bug #4 abaixo pra entender por que esses testes existem.
 - [x] Tela interativa (`src/tui/App.tsx` + `src/tui/startTui.tsx`, Ink/React):
       `orquestrador` sem argumentos abre um transcript rolável tipo chat —
       digita tarefa, roda via `runPipeline()`, mostra spinner e resultado;
@@ -264,7 +297,7 @@ teste sempre limpo depois):
   abrir o prompt de ambiguidade, confirmando que `/agent claude` de fato
   bypassa `planTask`.
 
-Três bugs reais encontrados e corrigidos durante o desenvolvimento:
+Quatro bugs reais encontrados e corrigidos durante o desenvolvimento:
 
 1. `rl.question()` sequencial do `node:readline/promises` trava
    indefinidamente quando o stdin é um pipe/não-TTY (a segunda chamada
@@ -278,7 +311,7 @@ Três bugs reais encontrados e corrigidos durante o desenvolvimento:
    invocado com stdin não-TTY. Mesma guarda `process.stdin.isTTY` aplicada
    antes de chamar `startTui()` em `cli.ts`, com mensagem amigável em vez
    de crash. Também: enquanto uma tarefa está rodando, o input da TUI
-   precisa ficar com `focus={false}` (prop do `ink-text-input`) — sem isso,
+   precisa ficar desabilitado (`disabled` em `PromptInput`) — sem isso,
    teclas digitadas durante o spinner ficavam acumuladas no campo sem
    feedback e o Enter era descartado silenciosamente, exigindo apertar
    Enter de novo depois. Descoberto testando com PTY real.
@@ -295,6 +328,31 @@ Três bugs reais encontrados e corrigidos durante o desenvolvimento:
    o stack trace real. Corrigido passando `{ incrementalRendering: true }`
    pro `render()` em `startTui.tsx` — o Ink passa a atualizar só as linhas
    que mudaram, reduzindo bastante o volume de bytes por frame.
+4. **`ink-text-input` perdia caractere em digitação rápida** — não uma
+   suspeita, um bug real, confirmado em produção e não só em teste. A
+   biblioteca computa o próximo valor do input a partir da prop `value`
+   capturada no último render (`nextValue = originalValue.slice(...) +
+   input + ...`) e só então chama `onChange(nextValue)` já pronto. Se duas
+   teclas chegam em sequência rápida demais pro React re-renderizar entre
+   uma e outra (rajada de digitação, ou múltiplos bytes chegando juntos no
+   stdin), o segundo cálculo enxerga a prop desatualizada e descarta a
+   primeira tecla — a análise inicial achava que era só um artefato de
+   teste (daí um `tick()` de proteção entre caracteres no
+   `App.test.tsx`), mas revisão apontou que isso mascarava o problema em
+   vez de resolvê-lo. Reproduzido de forma determinística tanto com PTY
+   real quanto com `ink-testing-library` escrevendo vários caracteres sem
+   aguardar entre eles (`stdin.write()` corrido, sem `tick()`).
+   **Corrigido substituindo `ink-text-input` por `src/tui/PromptInput.tsx`**
+   (componente próprio): o valor "de verdade" mora numa `ref`, mutada de
+   forma síncrona e imediata a cada tecla — nunca depende de uma prop ou
+   closure de um render anterior; o `useState` usado pro display sempre lê
+   o valor já atualizado da ref, nunca recalcula algo incrementalmente por
+   conta própria. Validado: (a) três novos testes em `App.test.tsx`
+   escrevendo em rajada **sem** o `tick()` de proteção, confirmando que a
+   correção resolve de verdade (esses mesmos testes foram checados contra
+   a implementação antiga via `ink-text-input` e falham lá, provando que
+   não são triviais); (b) PTY real com digitação + backspace + tarefa real,
+   confirmando que o texto final bate exatamente com o que foi digitado.
 
 ## Pendências conhecidas (pós-MVP)
 
