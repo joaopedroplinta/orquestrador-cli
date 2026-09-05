@@ -10,6 +10,7 @@ export type ParsedInput =
   | { kind: "set-agent"; agent: AgentName | null }
   | { kind: "toggle-auto" }
   | { kind: "set-routing"; routing: RoutingStrategy }
+  | { kind: "toggle-mascot" }
   | { kind: "error"; message: string };
 
 function isRoutingStrategy(value: string): value is RoutingStrategy {
@@ -62,10 +63,12 @@ export function parseInput(raw: string): ParsedInput {
         kind: "error",
         message: 'Uso: "/routing keyword" ou "/routing classify".',
       };
+    case "mascot":
+      return { kind: "toggle-mascot" };
     default:
       return {
         kind: "error",
-        message: `Comando desconhecido: "/${command}". Comandos disponíveis: /history, /agent, /auto, /routing, /exit, /quit.`,
+        message: `Comando desconhecido: "/${command}". Comandos disponíveis: /history, /agent, /auto, /routing, /mascot, /exit, /quit.`,
       };
   }
 }
@@ -77,11 +80,18 @@ export interface ModeState {
   autoMode: boolean;
   /** Equivalente ao --routing do modo CLI — padrão "keyword". */
   routing: RoutingStrategy;
+  /** Liga/desliga o mascote (banner, spinner e reações). Padrão true; --no-mascot seta o valor inicial. */
+  mascotEnabled: boolean;
 }
 
-export const INITIAL_MODE_STATE: ModeState = { forcedAgent: null, autoMode: false, routing: "keyword" };
+export const INITIAL_MODE_STATE: ModeState = {
+  forcedAgent: null,
+  autoMode: false,
+  routing: "keyword",
+  mascotEnabled: true,
+};
 
-// Só "set-agent", "toggle-auto" e "set-routing" alteram o modo; os demais retornam o estado inalterado.
+// Só "set-agent", "toggle-auto", "set-routing" e "toggle-mascot" alteram o modo; os demais retornam o estado inalterado.
 export function applyModeCommand(state: ModeState, action: ParsedInput): ModeState {
   switch (action.kind) {
     case "set-agent":
@@ -90,6 +100,8 @@ export function applyModeCommand(state: ModeState, action: ParsedInput): ModeSta
       return { ...state, autoMode: !state.autoMode };
     case "set-routing":
       return { ...state, routing: action.routing };
+    case "toggle-mascot":
+      return { ...state, mascotEnabled: !state.mascotEnabled };
     default:
       return state;
   }

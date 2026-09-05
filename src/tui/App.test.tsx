@@ -459,3 +459,102 @@ describe("App (TUI) — múltiplas tarefas em paralelo (';')", () => {
     expect(capturedOptions.tasks).toEqual(["claude: implementar X", "antigravity: implementar Y"]);
   });
 });
+
+describe("App (TUI) — mascote", () => {
+  it("o banner mostra o pinguim por padrão (mascote ligado)", () => {
+    const { lastFrame } = render(<App />);
+    // Uma das linhas da arte do banner — ver mascot.ts (MASCOT_BANNER_LINES).
+    expect(lastFrame()).toContain("/o o\\");
+  });
+
+  it("--no-mascot (initialMascotEnabled=false) tira o pinguim do banner e da StatusLine", () => {
+    const { lastFrame } = render(<App initialMascotEnabled={false} />);
+    expect(lastFrame()).not.toContain("/o o\\");
+    expect(lastFrame()).toContain("mascote: desligado");
+  });
+
+  it("/mascot alterna o estado e reflete na StatusLine", async () => {
+    const { lastFrame, stdin } = render(<App />);
+    expect(lastFrame()).toContain("mascote: ligado");
+
+    await submit(stdin, "/mascot");
+    expect(lastFrame()).toContain("Mascote desligado.");
+    expect(lastFrame()).toContain("mascote: desligado");
+
+    await submit(stdin, "/mascot");
+    expect(lastFrame()).toContain("Mascote ligado.");
+    expect(lastFrame()).toContain("mascote: ligado");
+  });
+
+  it("mostra o frame de \"pensando\" do mascote (em vez do spinner padrão) enquanto uma tarefa roda", async () => {
+    mockedRunPipeline.mockImplementation(() => new Promise(() => {})); // nunca resolve — só interessa o "durante"
+
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "pesquisar node");
+
+    expect(lastFrame()).toContain("(o o)"); // primeiro frame de MASCOT_THINKING_FRAMES, tick inicial
+  });
+
+  it("tarefa bem-sucedida mostra a carinha feliz do mascote junto do resultado", async () => {
+    mockedRunPipeline.mockImplementation(
+      (options) =>
+        new Promise((resolve) => {
+          options.onStepComplete?.(fakeStep("antigravity", "ok"));
+          resolve({ runId: "run-1", task: options.task, steps: [] });
+        }),
+    );
+
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "pesquisar node");
+    await tick();
+
+    expect(lastFrame()).toContain("(^ ^)");
+  });
+
+  it("tarefa com erro mostra a carinha confusa do mascote junto da mensagem de erro", async () => {
+    mockedRunPipeline.mockRejectedValue(new Error("algo deu errado"));
+
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "pesquisar node");
+    await tick();
+
+    expect(lastFrame()).toContain("(? ?)");
+    expect(lastFrame()).toContain("algo deu errado");
+  });
+
+  it("cancelamento mostra a carinha neutra do mascote junto da mensagem de cancelamento", async () => {
+    mockedRunPipeline.mockImplementation(
+      (options: RunPipelineOptions) =>
+        new Promise((_resolve, reject) => {
+          void options.resolveAmbiguousAgent?.("boa tarde").then(() => {
+            reject(new PipelineCancelledError("boa tarde"));
+          });
+        }),
+    );
+
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "boa tarde");
+    await submit(stdin, "cancelar");
+    await tick();
+
+    expect(lastFrame()).toContain("(- -)");
+    expect(lastFrame()).toContain("Execução cancelada");
+  });
+
+  it("com o mascote desligado, nenhuma carinha aparece no resultado nem no erro", async () => {
+    mockedRunPipeline.mockImplementation(
+      (options) =>
+        new Promise((resolve) => {
+          options.onStepComplete?.(fakeStep("antigravity", "ok"));
+          resolve({ runId: "run-1", task: options.task, steps: [] });
+        }),
+    );
+
+    const { lastFrame, stdin } = render(<App initialMascotEnabled={false} />);
+    await submit(stdin, "pesquisar node");
+    await tick();
+
+    expect(lastFrame()).not.toContain("(^ ^)");
+    expect(lastFrame()).not.toContain("(o o)");
+  });
+});

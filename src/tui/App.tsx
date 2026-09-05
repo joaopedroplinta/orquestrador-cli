@@ -14,6 +14,8 @@ import {
   type AgentRunResult,
 } from "../types.js";
 import { applyModeCommand, INITIAL_MODE_STATE, parseInput, type ModeState } from "./commands.js";
+import { MascotBanner, MascotSpinner } from "./Mascot.js";
+import { mascotFaceFor, type MascotOutcome } from "./mascot.js";
 import PromptInput from "./PromptInput.js";
 
 /** Tarefas separadas por ";" numa linha só ganham essa marca pra mostrar "Tarefa i/N" no transcript. */
@@ -23,11 +25,11 @@ interface BatchTag {
 }
 
 type TranscriptEntry =
-  | { kind: "banner"; id: string }
+  | { kind: "banner"; id: string; mascotEnabled: boolean }
   | { kind: "task"; id: string; text: string; agents: AgentName[]; batch?: BatchTag }
-  | { kind: "result"; id: string; steps: AgentRunResult[]; batch?: BatchTag }
-  | { kind: "error"; id: string; message: string; batch?: BatchTag }
-  | { kind: "cancelled"; id: string; message: string }
+  | { kind: "result"; id: string; steps: AgentRunResult[]; batch?: BatchTag; mascotFace?: string }
+  | { kind: "error"; id: string; message: string; batch?: BatchTag; mascotFace?: string }
+  | { kind: "cancelled"; id: string; message: string; mascotFace?: string }
   | { kind: "info"; id: string; text: string }
   | {
       kind: "retry";
@@ -86,6 +88,13 @@ function previewAgents(task: string, forcedAgent: AgentName | null): AgentName[]
   return planTask(prefix.text).map((step) => step.agent);
 }
 
+// undefined quando o mascote está desligado — os "case" de renderização só
+// prependem a carinha quando ela existe, então não precisa de um segundo
+// controle de "mostrar ou não" espalhado pela tela.
+function mascotFaceIfEnabled(outcome: MascotOutcome, mascotEnabled: boolean): string | undefined {
+  return mascotEnabled ? mascotFaceFor(outcome) : undefined;
+}
+
 // Reaproveitado pelo modo de uma tarefa só e pelo modo em lote — sempre a
 // mesma leitura de erro (cancelamento vs. erro de agente vs. genérico).
 function describeError(error: unknown): { kind: "error" | "cancelled"; message: string } {
@@ -98,9 +107,10 @@ function describeError(error: unknown): { kind: "error" | "cancelled"; message: 
   return { kind: "error", message: error instanceof Error ? error.message : String(error) };
 }
 
-function Banner() {
+function Banner({ mascotEnabled }: { mascotEnabled: boolean }) {
   return (
     <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1} marginBottom={1}>
+      {mascotEnabled && <MascotBanner />}
       <Text bold color="cyan">
         ⚡ orquestrador
       </Text>
@@ -111,7 +121,7 @@ function Banner() {
       <Text dimColor>
         <Text color="green">/history</Text> · <Text color="green">/agent claude|antigravity|auto</Text> ·{" "}
         <Text color="green">/auto</Text> · <Text color="green">/routing keyword|classify</Text> ·{" "}
-        <Text color="green">/exit</Text> · Ctrl+C
+        <Text color="green">/mascot</Text> · <Text color="green">/exit</Text> · Ctrl+C
       </Text>
     </Box>
   );
@@ -134,18 +144,29 @@ function StatusLine({ mode }: { mode: ModeState }) {
       <Text color={mode.autoMode ? "green" : undefined} dimColor={!mode.autoMode} bold={mode.autoMode}>
         {mode.autoMode ? "ligado" : "desligado"}
       </Text>
+      <Text dimColor>{"   mascote: "}</Text>
+      <Text color={mode.mascotEnabled ? "green" : undefined} dimColor={!mode.mascotEnabled}>
+        {mode.mascotEnabled ? "ligado" : "desligado"}
+      </Text>
     </Box>
   );
 }
 
-export default function App() {
+export interface AppProps {
+  /** Estado inicial do mascote — seedado pela flag --no-mascot do CLI (padrão: ligado). */
+  initialMascotEnabled?: boolean;
+}
+
+export default function App({ initialMascotEnabled = true }: AppProps = {}) {
   const { exit } = useApp();
-  const [transcript, setTranscript] = useState<TranscriptEntry[]>([{ kind: "banner", id: randomUUID() }]);
+  const [transcript, setTranscript] = useState<TranscriptEntry[]>([
+    { kind: "banner", id: randomUUID(), mascotEnabled: initialMascotEnabled },
+  ]);
   const [status, setStatus] = useState<Status>("idle");
   const [runningTask, setRunningTask] = useState<string | null>(null);
   const [pendingAgentPrompt, setPendingAgentPrompt] = useState<PendingAgentPrompt | undefined>();
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [mode, setMode] = useState<ModeState>(INITIAL_MODE_STATE);
+  const [mode, setMode] = useState<ModeState>({ ...INITIAL_MODE_STATE, mascotEnabled: initialMascotEnabled });
   const [streamingAgent, setStreamingAgent] = useState<AgentName | null>(null);
   const [streamingOutput, setStreamingOutput] = useState("");
   const [liveTasks, setLiveTasks] = useState<LiveTask[] | null>(null);
@@ -218,7 +239,12 @@ export default function App() {
             // não espera o resto do plano (pesquisa → implementação) pra
             // aparecer, senão a etapa anterior "sumiria" quando a próxima
             // começasse a streamar.
-            addEntry({ kind: "result", id: randomUUID(), steps: [stepResult] });
+            addEntry({
+              kind: "result",
+              id: randomUUID(),
+              steps: [stepResult],
+              mascotFace: mascotFaceIfEnabled("success", mode.mascotEnabled),
+            });
           },
           resolveAmbiguousAgent: (ambiguousTask) =>
             new Promise<AgentName | null>((resolve) => {
@@ -229,9 +255,19 @@ export default function App() {
       } catch (error) {
         const described = describeError(error);
         if (described.kind === "cancelled") {
-          addEntry({ kind: "cancelled", id: randomUUID(), message: described.message });
+          addEntry({
+            kind: "cancelled",
+            id: randomUUID(),
+            message: described.message,
+            mascotFace: mascotFaceIfEnabled("cancelled", mode.mascotEnabled),
+          });
         } else {
-          addEntry({ kind: "error", id: randomUUID(), message: described.message });
+          addEntry({
+            kind: "error",
+            id: randomUUID(),
+            message: described.message,
+            mascotFace: mascotFaceIfEnabled("error", mode.mascotEnabled),
+          });
         }
       } finally {
         setStatus("idle");
@@ -295,6 +331,7 @@ export default function App() {
               id: randomUUID(),
               steps: [stepResult],
               batch: { index: index + 1, total },
+              mascotFace: mascotFaceIfEnabled("success", mode.mascotEnabled),
             });
           },
         });
@@ -303,9 +340,20 @@ export default function App() {
           if (!result.error) return;
           const described = describeError(result.error);
           if (described.kind === "cancelled") {
-            addEntry({ kind: "cancelled", id: randomUUID(), message: described.message });
+            addEntry({
+              kind: "cancelled",
+              id: randomUUID(),
+              message: described.message,
+              mascotFace: mascotFaceIfEnabled("cancelled", mode.mascotEnabled),
+            });
           } else {
-            addEntry({ kind: "error", id: randomUUID(), message: described.message, batch: { index: i + 1, total } });
+            addEntry({
+              kind: "error",
+              id: randomUUID(),
+              message: described.message,
+              batch: { index: i + 1, total },
+              mascotFace: mascotFaceIfEnabled("error", mode.mascotEnabled),
+            });
           }
         });
       } finally {
@@ -389,6 +437,16 @@ export default function App() {
           });
           return;
         }
+        case "toggle-mascot": {
+          const nextMode = applyModeCommand(mode, parsed);
+          setMode(nextMode);
+          addEntry({
+            kind: "info",
+            id: randomUUID(),
+            text: `Mascote ${nextMode.mascotEnabled ? "ligado" : "desligado"}.`,
+          });
+          return;
+        }
         case "error":
           addEntry({ kind: "error", id: randomUUID(), message: parsed.message });
           return;
@@ -412,8 +470,8 @@ export default function App() {
       {status === "running" && liveTasks && (
         <Box flexDirection="column" marginTop={1}>
           <Text dimColor>
-            <Spinner type="dots" /> Rodando {liveTasks.length} tarefas em paralelo...{" "}
-            <Text dimColor>({elapsedSeconds}s)</Text>
+            {mode.mascotEnabled ? <MascotSpinner /> : <Spinner type="dots" />} Rodando {liveTasks.length} tarefas em
+            paralelo... <Text dimColor>({elapsedSeconds}s)</Text>
           </Text>
           {liveTasks.map((t) => (
             <Box key={t.index} flexDirection="column" marginTop={1}>
@@ -438,9 +496,7 @@ export default function App() {
       {status === "running" && !liveTasks && (
         <Box flexDirection="column" marginTop={1}>
           <Box>
-            <Text color="cyan">
-              <Spinner type="dots" />
-            </Text>
+            <Text color="cyan">{mode.mascotEnabled ? <MascotSpinner /> : <Spinner type="dots" />}</Text>
             <Text>
               {" "}
               Rodando: {runningTask} <Text dimColor>({elapsedSeconds}s)</Text>
@@ -480,7 +536,7 @@ export default function App() {
 function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
   switch (entry.kind) {
     case "banner":
-      return <Banner />;
+      return <Banner mascotEnabled={entry.mascotEnabled} />;
     case "task":
       return (
         <Box marginTop={1} flexDirection="column">
@@ -510,6 +566,7 @@ function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
           {entry.steps.map((step, i) => (
             <Box key={i} flexDirection="column" marginTop={1}>
               <Text bold color={agentColor(step.agent)}>
+                {entry.mascotFace ? `${entry.mascotFace} ` : ""}
                 {batchPrefix(entry.batch)}[{step.agent}] ({step.durationMs}ms)
               </Text>
               <Text>{step.output}</Text>
@@ -521,6 +578,7 @@ function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
       return (
         <Box marginTop={1}>
           <Text color="red">
+            {entry.mascotFace ? `${entry.mascotFace} ` : ""}
             {batchPrefix(entry.batch)}
             {entry.message}
           </Text>
@@ -529,7 +587,10 @@ function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
     case "cancelled":
       return (
         <Box marginTop={1}>
-          <Text color="yellow">{entry.message}</Text>
+          <Text color="yellow">
+            {entry.mascotFace ? `${entry.mascotFace} ` : ""}
+            {entry.message}
+          </Text>
         </Box>
       );
     case "info":
