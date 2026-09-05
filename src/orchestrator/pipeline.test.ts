@@ -175,6 +175,81 @@ describe("runPipeline", () => {
   });
 });
 
+describe("runPipeline — retry", () => {
+  it("loga no histórico as tentativas que falharam antes do sucesso final", async () => {
+    const result = fakeResult("claude", "deu certo na terceira");
+    result.retries = [
+      { attempt: 1, kind: "nonzero_exit", message: "falhou 1", delayMs: 1000, timestamp: "t1" },
+      { attempt: 2, kind: "timeout", message: "falhou 2", delayMs: 2000, timestamp: "t2" },
+    ];
+    mockedRunClaudeCode.mockResolvedValue(result);
+
+    await runPipeline({ task: "implementar algo" });
+
+    expect(mockedLogStep).toHaveBeenCalledWith(
+      "run-1",
+      expect.objectContaining({ agent: "claude", retries: result.retries }),
+    );
+  });
+
+  it("propaga maxRetries e um onRetry marcado com o agente certo pro wrapper", async () => {
+    mockedRunAntigravity.mockResolvedValue(fakeResult("antigravity", "pesquisa ok"));
+    mockedRunClaudeCode.mockResolvedValue(fakeResult("claude", "implementação ok"));
+
+    const onRetry = vi.fn();
+    const task = "pesquisar a versão do node e implementar um upgrade";
+    await runPipeline({ task, maxRetries: 5, onRetry });
+
+    expect(mockedRunAntigravity).toHaveBeenCalledWith(
+      expect.objectContaining({ maxRetries: 5, onRetry: expect.any(Function) }),
+    );
+    expect(mockedRunClaudeCode).toHaveBeenCalledWith(
+      expect.objectContaining({ maxRetries: 5, onRetry: expect.any(Function) }),
+    );
+
+    // Simula o wrapper chamando onRetry de verdade — pipeline.ts precisa
+    // repassar isso pro chamador já marcado com qual agente foi.
+    const antigravityOnRetry = mockedRunAntigravity.mock.calls[0]?.[0].onRetry;
+    antigravityOnRetry?.({ attempt: 1, kind: "timeout", message: "lento", delayMs: 1000, timestamp: "t", maxRetries: 5 });
+    expect(onRetry).toHaveBeenCalledWith(
+      "antigravity",
+      expect.objectContaining({ attempt: 1, kind: "timeout", maxRetries: 5 }),
+    );
+  });
+
+  it("esgotamento de tentativas: loga o erro final no histórico junto com o retries acumulado", async () => {
+    const error = new AgentError("claude", "nonzero_exit", "continua falhando", undefined, [
+      { attempt: 1, kind: "nonzero_exit", message: "falhou 1", delayMs: 1000, timestamp: "t1" },
+      { attempt: 2, kind: "nonzero_exit", message: "falhou 2", delayMs: 2000, timestamp: "t2" },
+      { attempt: 3, kind: "nonzero_exit", message: "falhou 3", delayMs: 4000, timestamp: "t3" },
+    ]);
+    mockedRunClaudeCode.mockRejectedValue(error);
+
+    await expect(runPipeline({ task: "implementar algo" })).rejects.toBe(error);
+
+    expect(mockedLogStep).toHaveBeenCalledWith(
+      "run-1",
+      expect.objectContaining({
+        agent: "claude",
+        error: "nonzero_exit: continua falhando",
+        retries: error.retries,
+      }),
+    );
+  });
+
+  it("erro não-elegível (ex: invalid_argument) propaga sem retries acumulados, já que o wrapper nem tentou de novo", async () => {
+    const error = new AgentError("antigravity", "invalid_argument", "argumento inválido");
+    mockedRunAntigravity.mockRejectedValue(error);
+
+    await expect(runPipeline({ task: "pesquisar algo" })).rejects.toBe(error);
+
+    expect(mockedLogStep).toHaveBeenCalledWith(
+      "run-1",
+      expect.objectContaining({ agent: "antigravity", retries: undefined }),
+    );
+  });
+});
+
 describe("runPipeline — streaming", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -277,6 +352,29 @@ describe("runPipelines", () => {
     expect(results[1]!.result).toBeUndefined();
     expect(mockedFinishRun).toHaveBeenCalledWith("run-pesquisar X");
     expect(mockedFinishRun).toHaveBeenCalledWith("run-implementar Y");
+  });
+
+  it("onTaskRetry chega marcado com o índice e o agente certos da tarefa que precisou retentar", async () => {
+    mockedStartRun.mockImplementation((task: string) => `run-${task}`);
+    mockedRunAntigravity.mockResolvedValue(fakeResult("antigravity", "ok"));
+    mockedRunClaudeCode.mockResolvedValue(fakeResult("claude", "ok"));
+
+    const onTaskRetry = vi.fn();
+    await runPipelines({ tasks: ["pesquisar X", "implementar Y"], maxRetries: 7, onTaskRetry });
+
+    expect(mockedRunAntigravity).toHaveBeenCalledWith(expect.objectContaining({ maxRetries: 7 }));
+
+    // Dispara o onRetry que o pipeline passou pro wrapper da segunda tarefa
+    // (índice 1, claude) e confirma que chega no callback do lote já com o
+    // índice/agente certos, sem precisar de N chamadas separadas.
+    const claudeOnRetry = mockedRunClaudeCode.mock.calls[0]?.[0].onRetry;
+    claudeOnRetry?.({ attempt: 2, kind: "timeout", message: "lento", delayMs: 2000, timestamp: "t", maxRetries: 7 });
+
+    expect(onTaskRetry).toHaveBeenCalledWith(
+      1,
+      "claude",
+      expect.objectContaining({ attempt: 2, kind: "timeout", maxRetries: 7 }),
+    );
   });
 
   it("tarefa ambígua no lote vira um resultado de erro, sem derrubar as outras nem abrir um run pra ela", async () => {

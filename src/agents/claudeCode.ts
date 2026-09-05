@@ -11,5 +11,7 @@ export async function runClaudeCode(options: AgentRunOptions): Promise<AgentRunR
     prompt,
     timeoutMs: options.timeoutMs,
     onChunk: options.onChunk,
+    maxRetries: options.maxRetries,
+    onRetry: options.onRetry,
   });
 }

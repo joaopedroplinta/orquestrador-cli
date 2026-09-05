@@ -9,6 +9,7 @@ import {
   AGENT_STREAMS_INCREMENTALLY,
   AgentError,
   PipelineCancelledError,
+  type AgentErrorKind,
   type AgentName,
   type AgentRunResult,
 } from "../types.js";
@@ -27,7 +28,17 @@ type TranscriptEntry =
   | { kind: "result"; id: string; steps: AgentRunResult[]; batch?: BatchTag }
   | { kind: "error"; id: string; message: string; batch?: BatchTag }
   | { kind: "cancelled"; id: string; message: string }
-  | { kind: "info"; id: string; text: string };
+  | { kind: "info"; id: string; text: string }
+  | {
+      kind: "retry";
+      id: string;
+      agent: AgentName;
+      attempt: number;
+      maxRetries: number;
+      errorKind: AgentErrorKind;
+      delayMs: number;
+      batch?: BatchTag;
+    };
 
 type Status = "idle" | "running" | "asking-agent";
 
@@ -162,6 +173,20 @@ export default function App() {
           onChunk: (_agent, chunk) => {
             setStreamingOutput((prev) => prev + chunk);
           },
+          onRetry: (agent, info) => {
+            // A tentativa que falhou pode ter escrito output parcial (streaming
+            // real) — descarta antes da próxima tentativa começar do zero.
+            setStreamingOutput("");
+            addEntry({
+              kind: "retry",
+              id: randomUUID(),
+              agent,
+              attempt: info.attempt,
+              maxRetries: info.maxRetries,
+              errorKind: info.kind,
+              delayMs: info.delayMs,
+            });
+          },
           onStepComplete: (stepResult) => {
             // Cada etapa vira uma entrada do transcript assim que termina —
             // não espera o resto do plano (pesquisa → implementação) pra
@@ -221,6 +246,21 @@ export default function App() {
             setLiveTasks(
               (prev) => prev?.map((t, i) => (i === index ? { ...t, streamingOutput: t.streamingOutput + chunk } : t)) ?? prev,
             );
+          },
+          onTaskRetry: (index, agent, info) => {
+            setLiveTasks(
+              (prev) => prev?.map((t, i) => (i === index ? { ...t, streamingOutput: "" } : t)) ?? prev,
+            );
+            addEntry({
+              kind: "retry",
+              id: randomUUID(),
+              agent,
+              attempt: info.attempt,
+              maxRetries: info.maxRetries,
+              errorKind: info.kind,
+              delayMs: info.delayMs,
+              batch: { index: index + 1, total },
+            });
           },
           onTaskStepComplete: (index, stepResult) => {
             addEntry({
@@ -456,6 +496,19 @@ function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
       return (
         <Box marginTop={1}>
           <Text dimColor>{entry.text}</Text>
+        </Box>
+      );
+    case "retry":
+      return (
+        <Box marginTop={1}>
+          <Text color="yellow">
+            {batchPrefix(entry.batch)}⟳{" "}
+            <Text bold color={agentColor(entry.agent)}>
+              [{entry.agent}]
+            </Text>{" "}
+            tentativa {entry.attempt}/{entry.maxRetries} falhou ({entry.errorKind}) — tentando de novo em{" "}
+            {entry.delayMs}ms
+          </Text>
         </Box>
       );
   }

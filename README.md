@@ -104,6 +104,34 @@ fora do lote) como saída.
 Uma linha sem `;`, ou com só uma parte não-vazia (`;` solto no final, por
 exemplo), continua rodando como uma tarefa única normal.
 
+### Retry automático em erros transitórios
+
+Vale pra qualquer jeito de rodar uma tarefa (`run`, modo interativo,
+lote com `;`): quando uma etapa falha por um erro que **pode** ser só um
+solavanco momentâneo — timeout, sessão que expirou no meio da chamada,
+ou um exit code não-zero sem cara de erro de sintaxe — o orquestrador
+tenta de novo automaticamente antes de propagar o erro, com backoff
+exponencial simples (1s, depois 2s, depois 4s...) e um máximo de 3
+retries por padrão (a tentativa inicial não conta nesse número).
+
+**Nem todo erro é retentado.** Comando não encontrado no PATH e
+argumento/sintaxe inválido falham direto na primeira tentativa — repetir
+não vai mudar o resultado, é sempre o mesmo erro de novo.
+
+Enquanto isso acontece, você vê uma mensagem indicando que uma nova
+tentativa está a caminho (pra não parecer que travou):
+
+```
+⟳ [antigravity] tentativa 1/3 falhou (timeout): "agy" excedeu o timeout de 180000ms — tentando de novo em 1000ms
+```
+
+No modo interativo, essa mensagem vira uma linha amarela no transcript
+(com o prefixo `Tarefa i/N` quando a tarefa faz parte de um lote via `;`),
+e o output ao vivo daquela etapa é reiniciado do zero na tentativa
+seguinte. Cada tentativa que falhou também fica registrada no histórico
+daquela etapa — `orquestrador history --last` mostra quantos retries uma
+etapa precisou e por quê, não só o resultado final.
+
 ### `orquestrador run "<tarefa>"`
 
 Roda o fluxo completo pra uma tarefa — ou pra **várias tarefas independentes
@@ -263,11 +291,18 @@ orquestrador history --last
   encontrado, sessão expirada, exit code não-zero). Aceitam um `onChunk`
   opcional ligado direto no stream de stdout do processo — só repassa o
   que o CLI subjacente realmente escreve, sem simular nada nesse nível.
+  `agents/shared.ts` (`runAgentCommand`) também é onde mora o retry
+  automático: um loop de backoff exponencial em torno de uma única
+  tentativa, que só repete erros classificados como transitórios
+  (`RETRYABLE_AGENT_ERROR_KINDS` em `types.ts`) e devolve o histórico de
+  tentativas que falharam (`retries`) junto do resultado final, seja
+  sucesso ou erro.
 - **`src/storage/history.ts`** — persistência em SQLite
   (`~/.orquestrador/history.db`). Cada etapa grava `fed_by_step_id`
   apontando pro id da etapa anterior cujo output virou seu contexto —
   é o que permite reconstruir a cadeia de handoff depois, via
-  `history --last`.
+  `history --last` — e `retries` (JSON com cada tentativa que falhou antes
+  do resultado final daquela etapa).
 - **`src/cli.ts`** — entrypoint (`commander`) com os comandos `run` e
   `history`, spinner (`ora`) e cores (`chalk`). Sem argumentos (zero
   subcomando), importa dinamicamente `src/tui/startTui.tsx` — quem só usa
@@ -311,9 +346,20 @@ assim que ela termina — sem esperar o resto do plano), e `runPipelines`
 com streaming por índice de tarefa: `onTaskStepStart`/`onTaskChunk`/
 `onTaskStepComplete` chegando com o índice certo pra cada tarefa do lote,
 chunks de duas tarefas concorrentes (uma real via antigravity, outra
-simulada via claude) não se misturando entre si, e tarefa ambígua no lote
+simulada via claude) não se misturando entre si, tarefa ambígua no lote
 virando erro em vez de abrir prompt mesmo com callbacks de streaming
-presentes.
+presentes, e a integração de retry (`logStep` recebendo o array de
+tentativas que falharam tanto no sucesso final quanto no erro esgotado,
+`maxRetries`/`onRetry` repassados pro wrapper com o agente já amarrado, e
+`onTaskRetry` chegando com o índice certo da tarefa do lote).
+
+`src/agents/shared.test.ts` cobre o loop de retry em si (mockando
+`execa`, sem chamar `claude`/`agy` de verdade): sucesso depois de 1 retry,
+a sequência completa de backoff exponencial (1s, 2s, 4s) até o sucesso na
+4ª tentativa, esgotamento de `maxRetries` propagando o erro final já com
+o histórico de tentativas embutido, e os dois casos de erro não-elegível
+pra retry (comando não encontrado / argumento inválido) falhando direto
+na primeira tentativa.
 
 `src/tui/commands.ts` (o parsing de slash command, o parsing de `;` pra
 múltiplas tarefas, e o estado de modo da TUI) também tem testes — é
@@ -358,8 +404,16 @@ histórico completo.
 - `planTask` e `classifyTaskWithClaude` avaliam a tarefa inteira; não fazem
   split textual real de uma frase em pedaços — cada etapa recebe o texto
   integral do prompt original, o handoff é só de *output* entre etapas.
-- Sem migração de schema no SQLite (mudança de schema exige apagar
-  `~/.orquestrador/history.db` em bancos antigos).
+- Sem sistema de migração de schema no SQLite de verdade — em geral, uma
+  mudança de schema exige apagar `~/.orquestrador/history.db` em bancos
+  antigos. A coluna `retries` foi a única exceção (migração pontual e
+  guardada, não um mecanismo genérico).
+- Retry automático não tenta de novo `PipelineCancelledError` nem erro de
+  roteamento ambíguo — só erros de execução do agente (`AgentError`) que
+  parecem transitórios. O número de retries (`maxRetries`, padrão 3) e o
+  backoff (1s/2s/4s, dobrando a cada tentativa) não são configuráveis via
+  flag do CLI ainda — só por quem chama `runPipeline`/`runPipelines`
+  programaticamente.
 - Paralelismo é só entre tarefas top-level independentes (várias tarefas
   na mesma chamada de `run`); dentro de uma tarefa que gera handoff
   (pesquisa → implementação), a execução continua sequencial por design —

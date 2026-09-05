@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { AgentName, HistoryRun, HistoryStep } from "../types.js";
+import type { AgentName, AgentRetryAttempt, HistoryRun, HistoryStep } from "../types.js";
 
 const DB_DIR = join(homedir(), ".orquestrador");
 const DB_PATH = join(DB_DIR, "history.db");
@@ -33,10 +33,24 @@ function getDb(): Database.Database {
       finished_at TEXT NOT NULL,
       duration_ms INTEGER NOT NULL,
       error TEXT,
-      fed_by_step_id INTEGER REFERENCES steps(id)
+      fed_by_step_id INTEGER REFERENCES steps(id),
+      retries TEXT
     );
   `);
+  ensureRetriesColumn(db);
   return db;
+}
+
+// Sem sistema de migração de verdade neste projeto (ver CLAUDE.md); pra não
+// quebrar bancos existentes (~/.orquestrador/history.db) só por causa dessa
+// coluna nova, adiciona ela em bancos antigos em vez de exigir apagar o
+// arquivo — `CREATE TABLE IF NOT EXISTS` sozinho não altera uma tabela que
+// já existia sem a coluna.
+function ensureRetriesColumn(database: Database.Database): void {
+  const columns = database.prepare("PRAGMA table_info(steps)").all() as { name: string }[];
+  if (!columns.some((column) => column.name === "retries")) {
+    database.exec("ALTER TABLE steps ADD COLUMN retries TEXT");
+  }
 }
 
 interface RunRow {
@@ -57,6 +71,7 @@ interface StepRow {
   duration_ms: number;
   error: string | null;
   fed_by_step_id: number | null;
+  retries: string | null;
 }
 
 function rowToStep(row: StepRow): HistoryStep {
@@ -71,6 +86,7 @@ function rowToStep(row: StepRow): HistoryStep {
     durationMs: row.duration_ms,
     error: row.error ?? undefined,
     fedByStepId: row.fed_by_step_id ?? undefined,
+    retries: row.retries ? (JSON.parse(row.retries) as AgentRetryAttempt[]) : undefined,
   };
 }
 
@@ -91,10 +107,16 @@ export function finishRun(runId: string): void {
 export function logStep(runId: string, step: Omit<HistoryStep, "id" | "runId">): number {
   const result = getDb()
     .prepare(
-      `INSERT INTO steps (run_id, agent, prompt, output, started_at, finished_at, duration_ms, error, fed_by_step_id)
-       VALUES (@runId, @agent, @prompt, @output, @startedAt, @finishedAt, @durationMs, @error, @fedByStepId)`,
+      `INSERT INTO steps (run_id, agent, prompt, output, started_at, finished_at, duration_ms, error, fed_by_step_id, retries)
+       VALUES (@runId, @agent, @prompt, @output, @startedAt, @finishedAt, @durationMs, @error, @fedByStepId, @retries)`,
     )
-    .run({ runId, error: null, fedByStepId: null, ...step });
+    .run({
+      runId,
+      error: null,
+      fedByStepId: null,
+      ...step,
+      retries: step.retries && step.retries.length > 0 ? JSON.stringify(step.retries) : null,
+    });
   return Number(result.lastInsertRowid);
 }
 
