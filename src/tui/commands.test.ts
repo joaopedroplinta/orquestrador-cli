@@ -49,6 +49,16 @@ describe("parseInput", () => {
     expect(parseInput("/auto")).toEqual({ kind: "toggle-auto" });
   });
 
+  it("/routing keyword e /routing classify setam a estratégia", () => {
+    expect(parseInput("/routing keyword")).toEqual({ kind: "set-routing", routing: "keyword" });
+    expect(parseInput("/routing classify")).toEqual({ kind: "set-routing", routing: "classify" });
+  });
+
+  it("/routing com argumento inválido ou ausente retorna erro, não trava nem vira tarefa", () => {
+    expect(parseInput("/routing banana").kind).toBe("error");
+    expect(parseInput("/routing").kind).toBe("error");
+  });
+
   it("comando desconhecido retorna erro amigável (nunca vira tarefa nem lança exceção)", () => {
     const result = parseInput("/foo");
     expect(result.kind).toBe("error");
@@ -57,22 +67,23 @@ describe("parseInput", () => {
     }
   });
 
-  it("é case-insensitive pro nome do comando e do argumento do agente", () => {
+  it("é case-insensitive pro nome do comando e do argumento do agente/roteamento", () => {
     expect(parseInput("/AGENT CLAUDE")).toEqual({ kind: "set-agent", agent: "claude" });
     expect(parseInput("/HISTORY")).toEqual({ kind: "history" });
+    expect(parseInput("/ROUTING CLASSIFY")).toEqual({ kind: "set-routing", routing: "classify" });
   });
 });
 
 describe("applyModeCommand", () => {
   it("/agent claude força o agente no estado", () => {
     const next = applyModeCommand(INITIAL_MODE_STATE, { kind: "set-agent", agent: "claude" });
-    expect(next).toEqual({ forcedAgent: "claude", autoMode: false });
+    expect(next).toEqual({ forcedAgent: "claude", autoMode: false, routing: "keyword" });
   });
 
   it("/agent auto reseta forcedAgent pra null, mantendo o resto do estado", () => {
-    const forced: import("./commands.js").ModeState = { forcedAgent: "claude", autoMode: true };
+    const forced: import("./commands.js").ModeState = { forcedAgent: "claude", autoMode: true, routing: "keyword" };
     const next = applyModeCommand(forced, { kind: "set-agent", agent: null });
-    expect(next).toEqual({ forcedAgent: null, autoMode: true });
+    expect(next).toEqual({ forcedAgent: null, autoMode: true, routing: "keyword" });
   });
 
   it("/auto alterna autoMode: desligado -> ligado -> desligado", () => {
@@ -83,6 +94,11 @@ describe("applyModeCommand", () => {
     expect(state.autoMode).toBe(false);
   });
 
+  it("/routing classify muda a estratégia, mantendo o resto do estado intacto", () => {
+    const next = applyModeCommand(INITIAL_MODE_STATE, { kind: "set-routing", routing: "classify" });
+    expect(next).toEqual({ forcedAgent: null, autoMode: false, routing: "classify" });
+  });
+
   it("comandos que não afetam o modo (exit, history, error, task) deixam o estado inalterado", () => {
     expect(applyModeCommand(INITIAL_MODE_STATE, { kind: "exit" })).toEqual(INITIAL_MODE_STATE);
     expect(applyModeCommand(INITIAL_MODE_STATE, { kind: "history" })).toEqual(INITIAL_MODE_STATE);
@@ -90,9 +106,10 @@ describe("applyModeCommand", () => {
     expect(applyModeCommand(INITIAL_MODE_STATE, { kind: "task", text: "x" })).toEqual(INITIAL_MODE_STATE);
   });
 
-  it("forçar agente e ligar --auto são independentes entre si", () => {
+  it("forçar agente, ligar --auto e trocar o roteamento são independentes entre si", () => {
     let state = applyModeCommand(INITIAL_MODE_STATE, { kind: "toggle-auto" });
     state = applyModeCommand(state, { kind: "set-agent", agent: "claude" });
-    expect(state).toEqual({ forcedAgent: "claude", autoMode: true });
+    state = applyModeCommand(state, { kind: "set-routing", routing: "classify" });
+    expect(state).toEqual({ forcedAgent: "claude", autoMode: true, routing: "classify" });
   });
 });

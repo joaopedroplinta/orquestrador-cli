@@ -1,4 +1,5 @@
 import { runClaudeCode } from "../agents/claudeCode.js";
+import { AGENT_NAMES } from "../agents/registry.js";
 import type { AgentName } from "../types.js";
 
 const ANTIGRAVITY_KEYWORDS = ["pesquisar", "buscar", "o que é", "o que e", "última versão de", "ultima versao de"];
@@ -11,8 +12,6 @@ export interface TaskStep {
   agent: AgentName;
   prompt: string;
 }
-
-const AGENT_NAMES: readonly AgentName[] = ["claude", "antigravity"];
 
 // Um token isolado (letras/dígitos/hífen/underscore) logo no início da tarefa,
 // seguido de ":" — "claude: implementar X". `\s*` só entre o token e o ":"

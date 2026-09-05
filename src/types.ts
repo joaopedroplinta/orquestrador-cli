@@ -1,17 +1,25 @@
+// Union mantida manualmente — é o único ponto de types.ts que precisa mudar
+// pra adicionar um agente novo. Ver "Adicionando um novo agente" no
+// CLAUDE.md pro passo a passo completo (o resto da fiação vive em
+// `agents/registry.ts`, derivada a partir dessa union).
 export type AgentName = "claude" | "antigravity";
 
-// Confirmado via probe manual (spawn + log de timing dos chunks de stdout,
-// ver CLAUDE.md): "agy -p" escreve o stdout aos poucos conforme gera a
-// resposta (~5-9 chunks pra uma resposta longa, ao longo de 1-2s) — dá pra
-// repassar isso como streaming real. "claude -p" entrega tudo num chunk só,
-// bem no final, já com o texto inteiro pronto — não há nada incremental pra
-// repassar. Pra esse último, o pipeline simula a revelação progressiva no
-// lado do cliente (ver `simulateStreamingReveal` em `orchestrator/pipeline.ts`),
-// deixando claro que não é streaming de verdade.
-export const AGENT_STREAMS_INCREMENTALLY: Record<AgentName, boolean> = {
-  antigravity: true,
-  claude: false,
-};
+/** Interface que todo wrapper de agente implementa — ver agents/registry.ts e CLAUDE.md. */
+export type AgentRunner = (options: AgentRunOptions) => Promise<AgentRunResult>;
+
+/**
+ * Estratégia de roteamento quando não há agente forçado (nem global via
+ * `--agent`/`/agent`, nem por prefixo "claude:"/"antigravity:" na tarefa):
+ * - "keyword" (padrão): `planTask()` por palavra-chave; `--auto`/`/auto`
+ *   liga um fallback pra `classifyTaskWithClaude()` só quando a keyword não
+ *   decidiu nada.
+ * - "classify": pula `planTask()` inteiramente e classifica TODA tarefa via
+ *   `classifyTaskWithClaude()` — mais lento (chamada extra ao claude antes
+ *   de rodar de verdade) e mais robusto pra tarefas sem palavra-chave óbvia.
+ *   `--auto`/`/auto` não tem efeito adicional aqui (a classificação já
+ *   sempre acontece).
+ */
+export type RoutingStrategy = "keyword" | "classify";
 
 export interface AgentRunOptions {
   prompt: string;

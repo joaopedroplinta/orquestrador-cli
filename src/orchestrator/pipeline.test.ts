@@ -338,6 +338,85 @@ describe("runPipelines — prefixo de agente por tarefa", () => {
   });
 });
 
+describe("runPipeline — estratégia de roteamento (routing: \"keyword\" | \"classify\")", () => {
+  it('padrão ("keyword" implícito) continua chamando planTask primeiro, sem classificar', async () => {
+    mockedRunClaudeCode.mockResolvedValue(fakeResult("claude", "ok"));
+
+    await runPipeline({ task: "implementar algo" });
+
+    // Só a etapa real, nunca uma chamada de classificação (que teria um
+    // prompt contendo "Classifique").
+    expect(mockedRunClaudeCode).toHaveBeenCalledTimes(1);
+    expect(mockedRunClaudeCode.mock.calls[0]?.[0].prompt).toBe("implementar algo");
+  });
+
+  it('routing: "classify" pula planTask inteiramente e classifica mesmo uma tarefa com keyword óbvia', async () => {
+    mockedRunClaudeCode
+      .mockResolvedValueOnce(fakeResult("claude", "implementacao")) // resposta da classificação
+      .mockResolvedValueOnce(fakeResult("claude", "implementação feita")); // etapa real do plano
+
+    // "implementar algo" bateria direto em CLAUDE_KEYWORDS via planTask — com
+    // routing: "classify" isso não deveria importar, a classificação sempre roda primeiro.
+    const result = await runPipeline({ task: "implementar algo", routing: "classify" });
+
+    expect(mockedRunClaudeCode).toHaveBeenCalledTimes(2);
+    expect(mockedRunClaudeCode.mock.calls[0]?.[0].prompt).toContain("Classifique");
+    expect(mockedRunAntigravity).not.toHaveBeenCalled();
+    expect(result.steps).toHaveLength(1);
+  });
+
+  it('routing: "classify" ignora --auto (a classificação já é sempre a única tentativa)', async () => {
+    mockedRunClaudeCode
+      .mockResolvedValueOnce(fakeResult("claude", "implementacao"))
+      .mockResolvedValueOnce(fakeResult("claude", "ok"));
+
+    await runPipeline({ task: "implementar algo", routing: "classify", auto: true });
+
+    // Só duas chamadas (classificação + etapa real) — se --auto também
+    // disparasse, haveria uma terceira chamada de classificação redundante.
+    expect(mockedRunClaudeCode).toHaveBeenCalledTimes(2);
+  });
+
+  it('routing: "classify" com classificação falhando cai pro resolvedor de ambiguidade, igual ao fluxo de keyword', async () => {
+    mockedRunClaudeCode.mockRejectedValueOnce(new AgentError("claude", "timeout", "excedeu o timeout"));
+    mockedRunAntigravity.mockResolvedValue(fakeResult("antigravity", "ok"));
+    const resolveAmbiguousAgent = vi.fn().mockResolvedValue("antigravity");
+
+    const task = "implementar algo";
+    const result = await runPipeline({ task, routing: "classify", resolveAmbiguousAgent });
+
+    expect(resolveAmbiguousAgent).toHaveBeenCalledWith(task);
+    expect(mockedRunAntigravity).toHaveBeenCalledWith({ prompt: task, context: undefined });
+    expect(result.steps).toHaveLength(1);
+  });
+
+  it("forceAgent (global ou prefixo) tem prioridade sobre qualquer routing", async () => {
+    mockedRunAntigravity.mockResolvedValue(fakeResult("antigravity", "ok"));
+
+    await runPipeline({ task: "implementar algo", routing: "classify", forceAgent: "antigravity" });
+
+    expect(mockedRunAntigravity).toHaveBeenCalledTimes(1);
+    expect(mockedRunClaudeCode).not.toHaveBeenCalled();
+  });
+
+  it('runPipelines repassa "routing" pra cada tarefa do lote — as duas classificam, mesmo com keywords diferentes', async () => {
+    mockedStartRun.mockImplementation((task: string) => `run-${task}`);
+    // Toda chamada ao claude que não é a etapa real é a classificação —
+    // resolve todas com "implementacao" só pra simplificar (não é o que
+    // está sendo testado aqui, é só destravar o plano de cada tarefa).
+    mockedRunClaudeCode.mockResolvedValue(fakeResult("claude", "implementacao"));
+
+    await runPipelines({ tasks: ["pesquisar X", "implementar Y"], routing: "classify" });
+
+    const classifyCalls = mockedRunClaudeCode.mock.calls.filter((call) => call[0].prompt.includes("Classifique"));
+    expect(classifyCalls).toHaveLength(2);
+    // Cada tarefa foi classificada com o texto certo, independente de "pesquisar X"
+    // ter keyword de antigravity — routing: "classify" ignora planTask nas duas.
+    expect(classifyCalls.some((call) => call[0].prompt.includes("pesquisar X"))).toBe(true);
+    expect(classifyCalls.some((call) => call[0].prompt.includes("implementar Y"))).toBe(true);
+  });
+});
+
 describe("runPipeline — streaming", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -502,7 +581,7 @@ describe("runPipelines — streaming", () => {
   });
 
   it("onTaskStepStart/onTaskChunk/onTaskStepComplete chegam com o índice certo pra cada tarefa", async () => {
-    // claude nunca recebe onChunk de verdade do wrapper (AGENT_STREAMS_INCREMENTALLY.claude
+    // claude nunca recebe onChunk de verdade do wrapper (AGENT_REGISTRY.claude.streamsIncrementally
     // é false) — o chunk dele vem da simulação, disparada só depois do mock resolver.
     // Por isso task 0 (antigravity) verifica o texto exato do chunk, e task 1 (claude) só
     // verifica que ALGUM chunk chegou com o índice/agente certos.

@@ -1,14 +1,12 @@
-import { runAntigravity } from "../agents/antigravity.js";
-import { runClaudeCode } from "../agents/claudeCode.js";
+import { AGENT_REGISTRY } from "../agents/registry.js";
 import { finishRun, logStep, startRun } from "../storage/history.js";
 import {
-  AGENT_STREAMS_INCREMENTALLY,
   AgentError,
   PipelineCancelledError,
   type AgentName,
   type AgentRetryAttempt,
-  type AgentRunOptions,
   type AgentRunResult,
+  type RoutingStrategy,
 } from "../types.js";
 import { classifyTaskWithClaude, parseTaskAgentPrefix, planTask, type TaskStep } from "./router.js";
 
@@ -20,7 +18,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 // Fallback visual pra agentes que não escrevem stdout de forma incremental
-// (ver AGENT_STREAMS_INCREMENTALLY em types.ts) — o texto já chegou completo
+// (ver `streamsIncrementally` em agents/registry.ts) — o texto já chegou completo
 // do processo; isso só revela ele aos poucos, num tempo fixo, curto, pra dar
 // a mesma sensação de streaming. NÃO é streaming de verdade: todo o dado já
 // existe antes da primeira chamada de onChunk aqui.
@@ -40,7 +38,12 @@ async function simulateStreamingReveal(text: string, onChunk: (chunk: string) =>
 export interface RunPipelineOptions {
   task: string;
   forceAgent?: AgentName;
-  /** Tarefa ambígua: tenta classificar via claude antes de cair pro fallback interativo. */
+  /**
+   * Estratégia de roteamento quando não há `forceAgent` (nem global nem por
+   * prefixo) — padrão "keyword". Ver `RoutingStrategy` em types.ts.
+   */
+  routing?: RoutingStrategy;
+  /** Tarefa ambígua com routing="keyword": tenta classificar via claude antes de cair pro fallback interativo. Sem efeito com routing="classify" (a classificação já sempre acontece). */
   auto?: boolean;
   /** Chamado quando a tarefa é ambígua e `auto` não resolveu. Retorna `null` pra cancelar. */
   resolveAmbiguousAgent?: (task: string) => Promise<AgentName | null>;
@@ -48,8 +51,9 @@ export interface RunPipelineOptions {
   onStepStart?: (agent: AgentName) => void;
   /**
    * Chamado com cada pedaço de output da etapa em andamento. Real (conforme o
-   * processo escreve) se o agente suportar (`AGENT_STREAMS_INCREMENTALLY`);
-   * senão, é o fallback simulado de `simulateStreamingReveal` — o código que
+   * processo escreve) se o agente suportar (`streamsIncrementally` em
+   * agents/registry.ts); senão, é o fallback simulado de
+   * `simulateStreamingReveal` — o código que
    * dispara cada caso está claramente separado, mas quem consome `onChunk`
    * recebe o mesmo formato dos dois jeitos.
    */
@@ -68,11 +72,6 @@ export interface PipelineResult {
   steps: AgentRunResult[];
 }
 
-const RUNNERS: Record<AgentName, (options: AgentRunOptions) => Promise<AgentRunResult>> = {
-  claude: runClaudeCode,
-  antigravity: runAntigravity,
-};
-
 export async function runPipeline(options: RunPipelineOptions): Promise<PipelineResult> {
   // "claude: implementar X" força o agente só dessa tarefa, sem precisar de
   // --agent/--auto pro lote inteiro (ver parseTaskAgentPrefix em router.ts).
@@ -87,11 +86,21 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
 
   const task = prefix.text;
   const forceAgent = options.forceAgent ?? prefix.agent;
+  const routing = options.routing ?? "keyword";
 
-  let plan: TaskStep[] = forceAgent ? [{ agent: forceAgent, prompt: task }] : planTask(task);
-
-  if (plan.length === 0 && options.auto) {
+  let plan: TaskStep[];
+  if (forceAgent) {
+    plan = [{ agent: forceAgent, prompt: task }];
+  } else if (routing === "classify") {
+    // Pula planTask() inteiramente — toda tarefa passa pela IA, não só a
+    // que a keyword deixou ambígua. --auto não entra em jogo aqui: a
+    // classificação já é sempre a primeira (e única) tentativa.
     plan = (await classifyTaskWithClaude(task)) ?? [];
+  } else {
+    plan = planTask(task);
+    if (plan.length === 0 && options.auto) {
+      plan = (await classifyTaskWithClaude(task)) ?? [];
+    }
   }
 
   if (plan.length === 0) {
@@ -117,8 +126,9 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
     for (const taskStep of plan) {
       options.onStepStart?.(taskStep.agent);
 
-      const streamsIncrementally = AGENT_STREAMS_INCREMENTALLY[taskStep.agent];
-      const result = await RUNNERS[taskStep.agent]({
+      const agentDef = AGENT_REGISTRY[taskStep.agent];
+      const streamsIncrementally = agentDef.streamsIncrementally;
+      const result = await agentDef.runner({
         prompt: taskStep.prompt,
         context: previousOutput,
         // Só passa onChunk pro wrapper quando o agente escreve de forma
@@ -176,6 +186,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
 export interface RunManyOptions {
   tasks: string[];
   forceAgent?: AgentName;
+  routing?: RoutingStrategy;
   auto?: boolean;
   /** Mesmos callbacks de streaming do runPipeline, mas com o índice (em `tasks`) da tarefa dona do evento. */
   onTaskStepStart?: (taskIndex: number, agent: AgentName) => void;
@@ -200,6 +211,7 @@ export async function runPipelines(options: RunManyOptions): Promise<RunManyResu
       runPipeline({
         task,
         forceAgent: options.forceAgent,
+        routing: options.routing,
         auto: options.auto,
         maxRetries: options.maxRetries,
         onStepStart: options.onTaskStepStart ? (agent) => options.onTaskStepStart!(index, agent) : undefined,

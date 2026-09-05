@@ -57,12 +57,17 @@ Dentro da tela:
   normal (por palavra-chave / `--auto`).
 - `/auto` — liga/desliga a classificação automática via `claude` quando o
   roteamento por palavra-chave vem vazio (equivalente ao `--auto` do modo
-  CLI). Independente de `/agent`: dá pra ter os dois ligados, ou só um.
+  CLI). Independente de `/agent`: dá pra ter os dois ligados, ou só um. Sem
+  efeito com `/routing classify` (ver abaixo).
+- `/routing keyword` ou `/routing classify` — equivalente ao `--routing` do
+  modo CLI: troca a estratégia de roteamento inteira pras próximas tarefas.
+  `classify` classifica toda tarefa via `claude`, mesmo uma com
+  palavra-chave óbvia, pulando a tabela de palavra-chave inteiramente.
 - Um comando começando com `/` que não é nenhum desses (`/foo`) mostra uma
   mensagem de erro amigável — não trava a tela nem vira uma tarefa.
-- O modo atual (`agente: automático` ou `agente: claude (forçado)`, e
-  `auto: ligado`/`desligado`) fica sempre visível logo abaixo do
-  transcript.
+- O modo atual (`agente: automático` ou `agente: claude (forçado)`,
+  `roteamento: keyword`/`classify`, e `auto: ligado`/`desligado`) fica
+  sempre visível logo abaixo do transcript.
 - Cada tarefa mostra logo abaixo qual agente foi roteado (`→ antigravity`
   ou `→ antigravity → claude`), e o spinner conta os segundos decorridos
   enquanto roda. Antigravity e Claude Code aparecem em cores diferentes e
@@ -159,7 +164,17 @@ Flags:
   agente, faz uma chamada leve e separada ao `claude` pedindo só a
   classificação da tarefa ("pesquisa" / "implementação" / "ambos") antes de
   cair no prompt interativo. Essa chamada de classificação não é uma etapa
-  do pipeline e não entra no histórico.
+  do pipeline e não entra no histórico. Sem efeito quando `--routing=classify`
+  (ver abaixo) — a classificação já sempre acontece nesse caso.
+- **`--routing <keyword|classify>`** (padrão `keyword`) — troca a
+  **estratégia** de roteamento inteira, não só o fallback de ambiguidade:
+  - `keyword` (padrão): o comportamento de sempre — palavra-chave primeiro,
+    `--auto` como fallback se não identificar nada.
+  - `classify`: classifica **toda** tarefa via `claude` antes de rodar,
+    mesmo uma com palavra-chave óbvia — pula a tabela acima inteiramente.
+    Mais lento (uma chamada extra ao `claude` antes da etapa real), mas
+    resolve tarefas sem nenhum sinal de palavra-chave sem precisar de
+    `--auto` nem do prompt interativo.
 
 **Fallback quando a tarefa é ambígua e nada mais resolveu:** o CLI pergunta
 no terminal qual agente usar (`claude`, `antigravity` ou `cancelar`). Se a
@@ -190,6 +205,11 @@ orquestrador run "e aí, isso aqui tá bom?" --auto
 orquestrador run "e aí, isso aqui tá bom?"
 # → tarefa ambígua, sem --auto: pergunta no terminal
 #   Escolha o agente ["claude" | "antigravity" | "cancelar"]:
+
+orquestrador run "descreva rapidamente o conceito de recursão" --routing=classify
+# → sem palavra-chave nenhuma (nem "pesquisar" nem "implementar"), mas
+#   --routing=classify resolve mesmo assim, sem prompt interativo —
+#   com o padrão (keyword) essa mesma tarefa cancelaria em stdin não-TTY
 
 orquestrador run "pesquisar a versão atual do TypeScript" "corrigir o typo no README"
 # → duas tarefas independentes, cada uma roteada e executada em paralelo
@@ -290,9 +310,9 @@ orquestrador history --last
        │
        ▼
 ┌────────────┐
-│ router.ts  │  decide o plano por palavra-chave;
-│ planTask() │  --auto / prompt interativo entram
-└────────────┘  só se o resultado vier vazio
+│ router.ts  │  decide o plano (--routing=keyword: por
+│ planTask() │  palavra-chave, --auto/prompt interativo
+└────────────┘  como fallback; --routing=classify: via IA)
        │  plano = [ {agente, prompt}, ... ]
        ▼
 ┌───────────────┐
@@ -318,17 +338,20 @@ orquestrador history --last
 
 - **`src/orchestrator/router.ts`** — `planTask()` monta o plano de etapas por
   palavra-chave (função pura, sem I/O). `classifyTaskWithClaude()` é o
-  roteador "leve via IA" usado só quando `--auto` está ativo e `planTask`
-  não decidiu nada; faz uma chamada isolada ao `claude` e nunca é logada
-  como etapa do pipeline.
+  roteador "via IA" — usado como estratégia primária inteira com
+  `--routing=classify`, ou só como fallback de ambiguidade quando `--auto`
+  está ativo e `planTask` não decidiu nada (`--routing=keyword`, o padrão);
+  faz uma chamada isolada ao `claude` e nunca é logada como etapa do
+  pipeline. `parseTaskAgentPrefix()` reconhece o prefixo `claude:`/
+  `antigravity:` no início de uma tarefa.
 - **`src/orchestrator/pipeline.ts`** — `runPipeline()` resolve o plano final
-  de uma tarefa (`--agent` força → senão `planTask` → senão `--auto` →
-  senão o prompt interativo/erro) e roda cada etapa em sequência,
-  repassando o output de uma etapa como `context` de entrada da próxima.
-  Loga cada etapa (sucesso ou erro) no histórico. `runPipelines()` roda
-  várias tarefas independentes chamando `runPipeline()` uma vez por tarefa
-  via `Promise.allSettled` — cada uma com seu próprio `runId`, sem afetar
-  as outras se uma falhar.
+  de uma tarefa (`--agent` global → prefixo por tarefa → estratégia de
+  roteamento `--routing` → prompt interativo/erro) e roda cada etapa em
+  sequência, repassando o output de uma etapa como `context` de entrada da
+  próxima. Loga cada etapa (sucesso ou erro) no histórico. `runPipelines()`
+  roda várias tarefas independentes chamando `runPipeline()` uma vez por
+  tarefa via `Promise.allSettled` — cada uma com seu próprio `runId`, sem
+  afetar as outras se uma falhar.
 - **`src/agents/`** — wrappers finos em volta de `execa` que disparam
   `claude -p "..."` e `agy -p "..." --print-timeout 3m`, com timeout
   configurável e tratamento consistente de erro (timeout, comando não
@@ -340,7 +363,11 @@ orquestrador history --last
   tentativa, que só repete erros classificados como transitórios
   (`RETRYABLE_AGENT_ERROR_KINDS` em `types.ts`) e devolve o histórico de
   tentativas que falharam (`retries`) junto do resultado final, seja
-  sucesso ou erro.
+  sucesso ou erro. `agents/registry.ts` é a fonte única de "quais agentes
+  existem" (`AGENT_REGISTRY`, `AGENT_NAMES`, `isAgentName()`) — pipeline,
+  router, CLI e TUI leem de lá em vez de hardcodar os nomes; ver
+  `CLAUDE.md` ("Adicionando um novo agente") pro passo a passo de estender
+  isso pra um terceiro agente.
 - **`src/storage/history.ts`** — persistência em SQLite
   (`~/.orquestrador/history.db`). Cada etapa grava `fed_by_step_id`
   apontando pro id da etapa anterior cujo output virou seu contexto —
@@ -390,7 +417,15 @@ o prefixo por tarefa, e prefixo com nome de agente inválido lançando erro
 claro sem chamar nenhum agente nem abrir run — no lote (`runPipelines`),
 cada tarefa pode ter seu próprio prefixo independente das outras, e uma
 tarefa com prefixo inválido vira um resultado de erro pontual sem afetar
-as demais. `runPipelines`
+as demais. Estratégia de roteamento: `--routing=keyword` (padrão) continua
+chamando `planTask` primeiro sem nunca classificar, `--routing=classify`
+pula `planTask` mesmo numa tarefa com palavra-chave óbvia, `--auto` fica
+sem efeito extra com `--routing=classify` (nunca uma segunda classificação
+redundante), classificação falhando com `--routing=classify` cai pro
+resolvedor de ambiguidade igual ao fluxo padrão, `forceAgent` (global ou
+prefixo) sempre tem prioridade sobre qualquer `--routing`, e o lote
+(`runPipelines`) repassa a estratégia pra cada tarefa independentemente.
+`runPipelines`
 (mapeamento tarefa → resultado, falha parcial isolada, tarefa ambígua no
 lote virando erro pontual, e uma checagem de que a execução é concorrente de
 verdade — tempo total bem abaixo da soma dos delays individuais), e
@@ -424,11 +459,19 @@ chamada sem retry resolve em bem menos de 1s mesmo com a outra presa no
 backoff, e o tempo total do par fica perto do delay de uma tarefa sozinha,
 não da soma das duas).
 
+`src/agents/registry.test.ts` cobre a estrutura do registro de agentes:
+`AGENT_REGISTRY` tem exatamente as entradas claude/antigravity, cada
+`runner` aponta pra mesma referência de função do wrapper de verdade,
+`streamsIncrementally` reflete o probe manual documentado, `AGENT_NAMES`
+é derivado das chaves do registro (não uma lista hardcoded separada), e
+`isAgentName` reconhece os dois agentes e rejeita nomes desconhecidos.
+
 `src/tui/commands.ts` (o parsing de slash command, o parsing de `;` pra
 múltiplas tarefas, e o estado de modo da TUI) também tem testes — é
 lógica pura, sem depender de renderizar a tela de verdade: `/agent
 claude|antigravity` forçando o agente, `/agent auto` resetando pro
-roteamento normal, `/auto` alternando o estado, os dois sendo
+roteamento normal, `/auto` alternando o estado, `/routing keyword|classify`
+mudando a estratégia mantendo o resto do estado, os três sendo
 independentes entre si, comando desconhecido/argumento inválido sempre
 virando erro (nunca uma tarefa, nunca uma exceção), 2+ tarefas separadas
 por `;` virando `{ kind: "tasks" }` com os textos aparados, e `;` solto
@@ -452,7 +495,11 @@ resultado aparecendo no bloco `Tarefa i/N` certo, streaming intercalado de
 duas fontes aparecendo em caixas ao vivo separadas sem misturar, tarefa
 ambígua dentro do lote virando erro sem nunca abrir o prompt embutido, e
 duas tarefas do mesmo lote com prefixos diferentes mostrando a prévia de
-rota certa cada uma, mesmo com a mesma palavra-chave nas duas.
+rota certa cada uma, mesmo com a mesma palavra-chave nas duas; e
+`/routing`: muda a estratégia e reflete na `StatusLine` sem afetar
+`/agent`/`/auto` já setados, argumento inválido mostra erro sem mudar o
+estado, e uma tarefa rodada depois chega em `runPipeline` com a estratégia
+certa de verdade (não só na exibição).
 `promptForAgent` (`src/cli.ts`, o fallback
 interativo do modo não-TUI) continua sem teste automatizado — é
 `readline` puro, sem a alternativa de um stdin falso.
@@ -493,6 +540,13 @@ histórico completo.
   caso, ~7s de atraso extra, não perda de dados). Na prática baixo risco
   hoje: os argumentos passados pros dois CLIs são fixos nos wrappers, o
   texto da tarefa nunca é reinterpretado como flag.
+- `--routing=classify` classifica em só três categorias fixas
+  ("pesquisa"/"implementação"/"ambos", mapeadas pra antigravity/claude/os
+  dois) — um terceiro agente adicionado ao registro (ver "Arquitetura") não
+  passa a ser considerado pela classificação automaticamente, precisaria
+  reescrever o prompt de classificação. `--auto`/`/auto` ligado junto com
+  `--routing=classify` não avisa que ficou sem efeito (é ignorado
+  silenciosamente, não um erro).
 - Paralelismo é só entre tarefas top-level independentes (várias tarefas
   na mesma chamada de `run`); dentro de uma tarefa que gera handoff
   (pesquisa → implementação), a execução continua sequencial por design —
@@ -507,7 +561,8 @@ histórico completo.
 - O streaming do Claude Code é sempre simulado (`(simulando…)`) — `claude
   -p` não escreve stdout de forma incremental em modo não-interativo,
   então não tem como ter streaming real dele hoje. Se isso mudar no
-  futuro, é só atualizar `AGENT_STREAMS_INCREMENTALLY` em `types.ts`.
+  futuro, é só atualizar `AGENT_REGISTRY.claude.streamsIncrementally` em
+  `src/agents/registry.ts`.
 - `--dangerously-skip-permissions` do Claude Code nunca é habilitado por
   este projeto.
 

@@ -3,9 +3,20 @@ import chalk from "chalk";
 import { Command } from "commander";
 import ora, { type Ora } from "ora";
 import { createInterface } from "node:readline/promises";
+import { isAgentName } from "./agents/registry.js";
 import { runPipeline, runPipelines, type PipelineResult } from "./orchestrator/pipeline.js";
 import { getLastRun, listRuns } from "./storage/history.js";
-import { AgentError, PipelineCancelledError, type AgentName, type AgentRetryAttempt } from "./types.js";
+import {
+  AgentError,
+  PipelineCancelledError,
+  type AgentName,
+  type AgentRetryAttempt,
+  type RoutingStrategy,
+} from "./types.js";
+
+function isRoutingStrategy(value: string): value is RoutingStrategy {
+  return value === "keyword" || value === "classify";
+}
 
 if (process.argv.slice(2).length === 0) {
   if (!process.stdin.isTTY) {
@@ -92,16 +103,29 @@ program
   )
   .option("--agent <agente>", "Força o agente (claude|antigravity), pulando o roteamento automático")
   .option(
-    "--auto",
-    "Se o roteamento por palavras-chave for ambíguo, classifica a tarefa via claude antes de perguntar",
+    "--routing <estrategia>",
+    'Estratégia de roteamento: "keyword" (padrão, por palavra-chave) ou "classify" ' +
+      "(classifica toda tarefa via claude, sem tentar keyword antes)",
+    "keyword",
   )
-  .action(async (tarefas: string[], opts: { agent?: string; auto?: boolean }) => {
-    if (opts.agent && opts.agent !== "claude" && opts.agent !== "antigravity") {
+  .option(
+    "--auto",
+    'Com --routing=keyword (padrão), se a palavra-chave for ambígua, classifica a tarefa via claude antes de ' +
+      "perguntar. Sem efeito com --routing=classify (a classificação já sempre acontece)",
+  )
+  .action(async (tarefas: string[], opts: { agent?: string; routing?: string; auto?: boolean }) => {
+    if (opts.agent && !isAgentName(opts.agent)) {
       console.error(chalk.red(`--agent inválido: "${opts.agent}". Use "claude" ou "antigravity".`));
       process.exitCode = 1;
       return;
     }
+    if (opts.routing && !isRoutingStrategy(opts.routing)) {
+      console.error(chalk.red(`--routing inválido: "${opts.routing}". Use "keyword" ou "classify".`));
+      process.exitCode = 1;
+      return;
+    }
     const forceAgent = opts.agent as AgentName | undefined;
+    const routing = opts.routing as RoutingStrategy | undefined;
 
     if (tarefas.length === 1) {
       const tarefa = tarefas[0]!;
@@ -110,6 +134,7 @@ program
         const result = await runPipeline({
           task: tarefa,
           forceAgent,
+          routing,
           auto: opts.auto,
           onRetry: (agent, info) => {
             spinner.stop();
@@ -141,6 +166,7 @@ program
     const results = await runPipelines({
       tasks: tarefas,
       forceAgent,
+      routing,
       auto: opts.auto,
       onTaskRetry: (index, agent, info) => {
         printRetry(agent, info, `[Tarefa ${index + 1}/${tarefas.length}] `);

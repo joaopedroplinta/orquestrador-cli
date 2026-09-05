@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 import { Box, Static, Text, useApp } from "ink";
 import Spinner from "ink-spinner";
 import { Fragment, useCallback, useEffect, useState } from "react";
+import { AGENT_REGISTRY } from "../agents/registry.js";
 import { runPipeline, runPipelines } from "../orchestrator/pipeline.js";
 import { parseTaskAgentPrefix, planTask } from "../orchestrator/router.js";
 import { listRuns } from "../storage/history.js";
 import {
-  AGENT_STREAMS_INCREMENTALLY,
   AgentError,
   PipelineCancelledError,
   type AgentErrorKind,
@@ -56,8 +56,16 @@ interface LiveTask {
   streamingOutput: string;
 }
 
+// Mapa em vez de ternário: um agente novo sem entrada aqui cai no fallback
+// neutro em vez de herdar silenciosamente a cor de outro agente qualquer —
+// ver "Adicionando um novo agente" no CLAUDE.md.
+const AGENT_COLORS: Partial<Record<AgentName, string>> = {
+  claude: "magenta",
+  antigravity: "blue",
+};
+
 function agentColor(agent: AgentName): string {
-  return agent === "claude" ? "magenta" : "blue";
+  return AGENT_COLORS[agent] ?? "white";
 }
 
 function batchPrefix(batch: BatchTag | undefined): string {
@@ -102,7 +110,8 @@ function Banner() {
       </Text>
       <Text dimColor>
         <Text color="green">/history</Text> · <Text color="green">/agent claude|antigravity|auto</Text> ·{" "}
-        <Text color="green">/auto</Text> · <Text color="green">/exit</Text> · Ctrl+C
+        <Text color="green">/auto</Text> · <Text color="green">/routing keyword|classify</Text> ·{" "}
+        <Text color="green">/exit</Text> · Ctrl+C
       </Text>
     </Box>
   );
@@ -119,6 +128,8 @@ function StatusLine({ mode }: { mode: ModeState }) {
       ) : (
         <Text dimColor>automático</Text>
       )}
+      <Text dimColor>{"   roteamento: "}</Text>
+      <Text bold={mode.routing === "classify"}>{mode.routing}</Text>
       <Text dimColor>{"   auto: "}</Text>
       <Text color={mode.autoMode ? "green" : undefined} dimColor={!mode.autoMode} bold={mode.autoMode}>
         {mode.autoMode ? "ligado" : "desligado"}
@@ -179,6 +190,7 @@ export default function App() {
         await runPipeline({
           task,
           forceAgent: mode.forcedAgent ?? undefined,
+          routing: mode.routing,
           auto: mode.autoMode,
           onStepStart: (agent) => {
             setStreamingAgent(agent);
@@ -252,6 +264,7 @@ export default function App() {
         const results = await runPipelines({
           tasks: texts,
           forceAgent: mode.forcedAgent ?? undefined,
+          routing: mode.routing,
           auto: mode.autoMode,
           onTaskStepStart: (index, agent) => {
             setLiveTasks((prev) => prev?.map((t, i) => (i === index ? { ...t, agent, streamingOutput: "" } : t)) ?? prev);
@@ -363,6 +376,19 @@ export default function App() {
           });
           return;
         }
+        case "set-routing": {
+          const nextMode = applyModeCommand(mode, parsed);
+          setMode(nextMode);
+          addEntry({
+            kind: "info",
+            id: randomUUID(),
+            text:
+              nextMode.routing === "classify"
+                ? "Roteamento: classify (toda tarefa é classificada via claude; /auto não tem efeito extra)."
+                : "Roteamento: keyword (padrão, por palavra-chave).",
+          });
+          return;
+        }
         case "error":
           addEntry({ kind: "error", id: randomUUID(), message: parsed.message });
           return;
@@ -399,7 +425,7 @@ export default function App() {
                   {"│ "}
                   <Text bold color={agentColor(t.agent)}>
                     [{t.agent}]
-                    {!AGENT_STREAMS_INCREMENTALLY[t.agent] && <Text dimColor> (simulando…)</Text>}
+                    {!AGENT_REGISTRY[t.agent].streamsIncrementally && <Text dimColor> (simulando…)</Text>}
                   </Text>
                 </Text>
               )}
@@ -424,7 +450,7 @@ export default function App() {
             <Box flexDirection="column" marginTop={1}>
               <Text bold color={agentColor(streamingAgent)}>
                 [{streamingAgent}]
-                {!AGENT_STREAMS_INCREMENTALLY[streamingAgent] && <Text dimColor> (simulando…)</Text>}
+                {!AGENT_REGISTRY[streamingAgent].streamsIncrementally && <Text dimColor> (simulando…)</Text>}
               </Text>
               <Text>{streamingOutput}</Text>
             </Box>
