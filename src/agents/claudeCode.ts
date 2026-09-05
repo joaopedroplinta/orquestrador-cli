@@ -10,5 +10,6 @@ export async function runClaudeCode(options: AgentRunOptions): Promise<AgentRunR
     args: ["-p", prompt],
     prompt,
     timeoutMs: options.timeoutMs,
+    onChunk: options.onChunk,
   });
 }

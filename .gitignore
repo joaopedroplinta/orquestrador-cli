@@ -2,3 +2,5 @@ node_modules/
 dist/
 *.log
 .env
+.idea/
+.claude/scheduled_tasks.lock

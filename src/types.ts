@@ -1,9 +1,24 @@
 export type AgentName = "claude" | "antigravity";
 
+// Confirmado via probe manual (spawn + log de timing dos chunks de stdout,
+// ver CLAUDE.md): "agy -p" escreve o stdout aos poucos conforme gera a
+// resposta (~5-9 chunks pra uma resposta longa, ao longo de 1-2s) — dá pra
+// repassar isso como streaming real. "claude -p" entrega tudo num chunk só,
+// bem no final, já com o texto inteiro pronto — não há nada incremental pra
+// repassar. Pra esse último, o pipeline simula a revelação progressiva no
+// lado do cliente (ver `simulateStreamingReveal` em `orchestrator/pipeline.ts`),
+// deixando claro que não é streaming de verdade.
+export const AGENT_STREAMS_INCREMENTALLY: Record<AgentName, boolean> = {
+  antigravity: true,
+  claude: false,
+};
+
 export interface AgentRunOptions {
   prompt: string;
   context?: string;
   timeoutMs?: number;
+  /** Chamado com cada pedaço de stdout assim que o processo escreve. */
+  onChunk?: (chunk: string) => void;
 }
 
 export interface AgentRunResult {

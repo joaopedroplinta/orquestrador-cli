@@ -147,7 +147,19 @@ orquestrador                             # zero args: abre a tela interativa (In
   buffer do pty em rajadas de digitação rápida (`Error: write EIO`,
   descoberto testando com PTY real via `pexpect`). Qualquer novo elemento
   visual "pesado" na TUI (bordas largas, muito texto por frame) deve levar
-  isso em conta.
+  isso em conta — inclusive o streaming (ver abaixo), que foi
+  re-validado especificamente contra esse risco.
+- **Streaming de output é real pro `antigravity`, simulado pro `claude`** —
+  confirmado com um probe manual (`spawn` + log de timing dos chunks de
+  stdout, ver "Estado atual"): `agy -p` escreve aos poucos conforme gera a
+  resposta; `claude -p` entrega tudo num chunk só, no final. A flag
+  `AGENT_STREAMS_INCREMENTALLY` (`types.ts`) registra isso por agente.
+  `runAgentCommand` (`src/agents/shared.ts`) só liga um `onChunk` de
+  verdade no stdout do `execa` — não inventa nada. Quem decide *fingir*
+  streaming pra um agente que não escreve incremental é
+  `simulateStreamingReveal()` em `pipeline.ts`, claramente separada e
+  comentada como fallback visual — nunca colocar essa lógica dentro do
+  wrapper do agente nem fingir que é dado real.
 - **A partir de agora, trabalho por branch + PR, nunca commit direto na
   `main`.** Toda mudança nova nasce numa branch (`feature/...`), e ao
   terminar abro PR via `gh pr create` pra revisão.
@@ -196,7 +208,7 @@ orquestrador                             # zero args: abre a tela interativa (In
       cabeçalho `=== Tarefa i/N ===` por resultado conforme chegam).
       `printResult`/`printError` foram extraídas em `cli.ts` pra serem
       reaproveitadas pelos dois modos.
-- [x] Testes automatizados com Vitest (52 casos):
+- [x] Testes automatizados com Vitest (58 casos):
   - `src/orchestrator/router.test.ts` — `planTask` (4 combinações de
     palavra-chave + case insensitivity) e `classifyTaskWithClaude` (3
     classificações possíveis, falha da chamada, resposta inesperada), tudo
@@ -206,11 +218,17 @@ orquestrador                             # zero args: abre a tela interativa (In
     falha de agente propagando erro e ainda logando/finalizando o run,
     `--agent` com prioridade sobre `--auto`, `--auto` classificando com
     sucesso e rodando o plano resultante, `--auto` caindo pro resolvedor
-    quando a classificação falha ou vem inesperada, e `runPipelines`
+    quando a classificação falha ou vem inesperada, `runPipelines`
     (mapeamento tarefa → resultado, falha parcial isolada, tarefa ambígua
     no lote virando erro pontual, e uma checagem de concorrência real com
     margem de tolerância de `1.5x` o maior delay individual pra não ficar
-    flaky).
+    flaky), e streaming (`onStepStart`/`onStepComplete` disparando na
+    ordem certa, chunks reais repassados sem passar pela simulação pro
+    agente que streama de verdade, `simulateStreamingReveal` reconstruindo
+    o texto original sem perda/duplicação pro agente que não streama —
+    com `vi.useFakeTimers()` pra não esperar os ~500ms de verdade — e
+    `onStepComplete` disparando pra uma etapa bem-sucedida mesmo se a
+    etapa seguinte falhar depois).
   - `src/tui/commands.test.ts` — `parseInput` (task vs. cada slash command,
     case insensitivity, `/agent` com argumento inválido/ausente vira erro,
     comando desconhecido vira erro) e `applyModeCommand` (`/agent`
@@ -226,11 +244,14 @@ orquestrador                             # zero args: abre a tela interativa (In
     embutido (escolher agente e cancelar), os slash commands (`/agent`,
     `/auto`, `/agent auto`, `/history` com e sem execuções, comando
     desconhecido não quebrando a tela, `/exit` encerrando a aplicação)
-    refletindo na `StatusLine` e no transcript, e 3 testes de digitação em
+    refletindo na `StatusLine` e no transcript, 3 testes de digitação em
     rajada **sem** o `tick()` de proteção usado nos outros testes (nenhum
     caractere perdido, Enter chegando logo em seguida ainda submete o
-    texto completo, slash command reconhecido mesmo digitado rápido) —
-    ver bug #4 abaixo pra entender por que esses testes existem.
+    texto completo, slash command reconhecido mesmo digitado rápido —
+    ver bug #4 pra entender por que esses testes existem), e 2 testes de
+    streaming: a caixa ao vivo mostrando `[agente]` + o texto acumulado
+    enquanto a etapa roda, e a tag `(simulando…)` aparecendo só quando o
+    agente não streama de verdade.
 - [x] Tela interativa (`src/tui/App.tsx` + `src/tui/startTui.tsx`, Ink/React):
       `orquestrador` sem argumentos abre um transcript rolável tipo chat —
       digita tarefa, roda via `runPipeline()`, mostra spinner e resultado;
@@ -255,6 +276,38 @@ orquestrador                             # zero args: abre a tela interativa (In
       tarefa, nunca derruba a tela. Modo atual sempre visível numa
       `StatusLine` logo abaixo do transcript (`agente: automático` /
       `agente: claude (forçado)`, `auto: ligado`/`desligado`).
+- [x] Streaming de output ao vivo na TUI. `AGENT_STREAMS_INCREMENTALLY`
+      (`types.ts`) registra, por agente, se o CLI subjacente escreve stdout
+      de forma incremental — confirmado com um probe manual (`node:child_process.spawn`
+      + log de timestamp de cada chunk de stdout, ver arquivo de sessão
+      descartável em `/tmp`, não versionado):
+      - `agy -p`: **streaming real** — numa resposta longa, o stdout chegou
+        em 5 a 9 chunks ao longo de 1 a 2 segundos, cadência de ~200ms.
+      - `claude -p`: **sem streaming** — o stdout inteiro chegou num único
+        chunk, só depois do processo já ter terminado de gerar a resposta
+        completa internamente.
+      `runAgentCommand` (`src/agents/shared.ts`) aceita `onChunk?: (chunk:
+      string) => void`, ligado direto no stream real do `execa`
+      (`subprocess.stdout.on("data", ...)`) — não inventa nada, só repassa
+      o que realmente chega. `RunPipelineOptions` ganhou `onStepStart`,
+      `onChunk(agent, chunk)` e `onStepComplete(result)`
+      (`src/orchestrator/pipeline.ts`): pra um agente com streaming real, o
+      `onChunk` do wrapper é repassado direto; pra um agente sem
+      (`claude`), depois do resultado completo chegar,
+      `simulateStreamingReveal()` revela o texto em ~24 pedaços ao longo de
+      500ms fixos (não escala com o tamanho do texto, pra não *atrasar*
+      artificialmente uma resposta longa) — **isso não é streaming de
+      verdade**, é só um efeito visual, e o código deixa isso explícito
+      (nome da função, comentário, e a flag `AGENT_STREAMS_INCREMENTALLY`
+      controlando qual caminho roda). `onStepComplete` também faz cada
+      etapa virar uma entrada do transcript assim que ela termina — não
+      espera o plano inteiro (pesquisa → implementação) terminar pra
+      mostrar o resultado da primeira etapa. `App.tsx` mostra um indicador
+      "(simulando…)" ao lado do nome do agente quando o streaming daquela
+      etapa é simulado, pra ficar claro pro usuário também, não só no
+      código. `run`/`runPipelines` (modo não-interativo/paralelo) não
+      passam nenhum desses callbacks — comportamento e performance
+      inalterados ali.
 
 Testado manualmente (chamando `agy`/`claude` reais do PATH, histórico de
 teste sempre limpo depois):
@@ -296,6 +349,16 @@ teste sempre limpo depois):
   palavra-chave (`"boa tarde, tudo bem?"`) rodou direto no `claude` sem
   abrir o prompt de ambiguidade, confirmando que `/agent claude` de fato
   bypassa `planTask`.
+- Streaming, especificamente validado contra o risco de reintroduzir o bug
+  #3 (EIO): tarefa real de resposta longa em cada agente, rodando rápido.
+  `antigravity` (streaming real) — texto foi aparecendo aos poucos na
+  caixa ao vivo, sem a tag `(simulando…)`, sem nenhum `uncaughtException`/
+  `EIO` no log. `claude` (fallback simulado) — mesma coisa, com a tag
+  `(simulando…)` aparecendo corretamente; os ~24 updates de estado em
+  500ms (mais agressivo que qualquer digitação humana, de propósito, pra
+  estressar o cenário que causou o bug #3) não estouraram o buffer do pty.
+  Ambos terminaram e saíram limpo. Confirma que `incrementalRendering`
+  (bug #3) segura mesmo sob a carga adicional do streaming.
 
 Quatro bugs reais encontrados e corrigidos durante o desenvolvimento:
 
@@ -369,8 +432,13 @@ Quatro bugs reais encontrados e corrigidos durante o desenvolvimento:
   alimenta (`resolveAmbiguousAgent` no pipeline) está coberta.
 - Sem sintaxe pra forçar um agente diferente por tarefa individual no modo
   de várias tarefas — `--agent`/`--auto` valem pro lote inteiro.
-- TUI: sem streaming de output ao vivo (decisão explícita — v1 mantém
-  spinner-até-terminar, igual ao `run`); sem rodar tarefas em paralelo
-  dentro da tela.
+- TUI: sem rodar tarefas em paralelo dentro da tela (`run`/`runPipelines`
+  continuam sendo o único jeito de rodar várias tarefas ao mesmo tempo).
+- Streaming: `simulateStreamingReveal` usa um tempo fixo (~500ms) e número
+  fixo de pedaços (~24), independente do tamanho real do texto — não
+  tentei calibrar isso com base em testes de usabilidade, só um valor que
+  pareceu razoável. Se `claude -p` algum dia passar a suportar streaming
+  de verdade em modo não-interativo, `AGENT_STREAMS_INCREMENTALLY.claude`
+  é o único lugar que precisa mudar.
 - Sem interface gráfica além da TUI de terminal, sem multi-tenant (fora de
   escopo do MVP).

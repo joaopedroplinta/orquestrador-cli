@@ -5,7 +5,13 @@ import { Fragment, useCallback, useEffect, useState } from "react";
 import { runPipeline } from "../orchestrator/pipeline.js";
 import { planTask } from "../orchestrator/router.js";
 import { listRuns } from "../storage/history.js";
-import { AgentError, PipelineCancelledError, type AgentName, type AgentRunResult } from "../types.js";
+import {
+  AGENT_STREAMS_INCREMENTALLY,
+  AgentError,
+  PipelineCancelledError,
+  type AgentName,
+  type AgentRunResult,
+} from "../types.js";
 import { applyModeCommand, INITIAL_MODE_STATE, parseInput, type ModeState } from "./commands.js";
 import PromptInput from "./PromptInput.js";
 
@@ -71,6 +77,8 @@ export default function App() {
   const [pendingAgentPrompt, setPendingAgentPrompt] = useState<PendingAgentPrompt | undefined>();
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [mode, setMode] = useState<ModeState>(INITIAL_MODE_STATE);
+  const [streamingAgent, setStreamingAgent] = useState<AgentName | null>(null);
+  const [streamingOutput, setStreamingOutput] = useState("");
 
   useEffect(() => {
     if (status !== "running") {
@@ -109,17 +117,30 @@ export default function App() {
       addEntry({ kind: "task", id: randomUUID(), text: task, agents });
 
       try {
-        const result = await runPipeline({
+        await runPipeline({
           task,
           forceAgent: mode.forcedAgent ?? undefined,
           auto: mode.autoMode,
+          onStepStart: (agent) => {
+            setStreamingAgent(agent);
+            setStreamingOutput("");
+          },
+          onChunk: (_agent, chunk) => {
+            setStreamingOutput((prev) => prev + chunk);
+          },
+          onStepComplete: (stepResult) => {
+            // Cada etapa vira uma entrada do transcript assim que termina —
+            // não espera o resto do plano (pesquisa → implementação) pra
+            // aparecer, senão a etapa anterior "sumiria" quando a próxima
+            // começasse a streamar.
+            addEntry({ kind: "result", id: randomUUID(), steps: [stepResult] });
+          },
           resolveAmbiguousAgent: (ambiguousTask) =>
             new Promise<AgentName | null>((resolve) => {
               setPendingAgentPrompt({ task: ambiguousTask, resolve });
               setStatus("asking-agent");
             }),
         });
-        addEntry({ kind: "result", id: randomUUID(), steps: result.steps });
       } catch (error) {
         if (error instanceof PipelineCancelledError) {
           addEntry({ kind: "cancelled", id: randomUUID(), message: error.message });
@@ -139,6 +160,8 @@ export default function App() {
       } finally {
         setStatus("idle");
         setRunningTask(null);
+        setStreamingAgent(null);
+        setStreamingOutput("");
       }
     },
     [addEntry, mode],
@@ -222,14 +245,25 @@ export default function App() {
       <StatusLine mode={mode} />
 
       {status === "running" && (
-        <Box marginTop={1}>
-          <Text color="cyan">
-            <Spinner type="dots" />
-          </Text>
-          <Text>
-            {" "}
-            Rodando: {runningTask} <Text dimColor>({elapsedSeconds}s)</Text>
-          </Text>
+        <Box flexDirection="column" marginTop={1}>
+          <Box>
+            <Text color="cyan">
+              <Spinner type="dots" />
+            </Text>
+            <Text>
+              {" "}
+              Rodando: {runningTask} <Text dimColor>({elapsedSeconds}s)</Text>
+            </Text>
+          </Box>
+          {streamingAgent && streamingOutput.length > 0 && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold color={agentColor(streamingAgent)}>
+                [{streamingAgent}]
+                {!AGENT_STREAMS_INCREMENTALLY[streamingAgent] && <Text dimColor> (simulando…)</Text>}
+              </Text>
+              <Text>{streamingOutput}</Text>
+            </Box>
+          )}
         </Box>
       )}
 

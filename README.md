@@ -35,8 +35,8 @@ Sem `npm link`, rode via `node dist/cli.js <comando>` ou `npm run dev -- <comand
 Rodar `orquestrador` sozinho, sem subcomando, abre uma tela interativa
 (construída com [Ink](https://github.com/vadimdemedes/ink), a mesma lib por
 trás da interface do Claude Code): digite uma tarefa, aperte Enter, veja o
-spinner e o resultado aparecerem no transcript, e digite a próxima tarefa
-sem sair do processo — tipo uma conversa.
+output do agente aparecendo aos poucos no transcript enquanto ele roda, e
+digite a próxima tarefa sem sair do processo — tipo uma conversa.
 
 ```bash
 orquestrador
@@ -67,11 +67,20 @@ Dentro da tela:
   ou `→ antigravity → claude`), e o spinner conta os segundos decorridos
   enquanto roda. Antigravity e Claude Code aparecem em cores diferentes e
   consistentes no transcript, pra escanear rápido quem fez o quê.
+- **O output do agente aparece progressivamente enquanto ele roda**, não só
+  no final. Isso é streaming *real* pro Antigravity (o `agy -p` escreve
+  stdout aos poucos, conforme gera a resposta) — o Claude Code não faz
+  isso em modo não-interativo (`claude -p` entrega tudo de uma vez, só
+  quando termina), então pra ele a tela simula a revelação progressiva do
+  texto já pronto, marcada com um `(simulando…)` ao lado do nome do
+  agente pra não confundir com o streaming de verdade. Cada etapa de uma
+  tarefa em duas partes (pesquisa → implementação) vira uma entrada do
+  transcript assim que aquela etapa específica termina, sem esperar a
+  outra.
 
-O que fica de fora da v1 (ver "Limitações" abaixo): sem streaming de output
-ao vivo (mostra spinner até terminar, igual ao modo não-interativo), e sem
-rodar várias tarefas em paralelo dentro da tela — pra isso, use
-`orquestrador run` diretamente.
+O que fica de fora da v1 (ver "Limitações" abaixo): sem rodar várias
+tarefas em paralelo dentro da tela — pra isso, use `orquestrador run`
+diretamente.
 
 ### `orquestrador run "<tarefa>"`
 
@@ -229,7 +238,9 @@ orquestrador history --last
 - **`src/agents/`** — wrappers finos em volta de `execa` que disparam
   `claude -p "..."` e `agy -p "..." --print-timeout 3m`, com timeout
   configurável e tratamento consistente de erro (timeout, comando não
-  encontrado, sessão expirada, exit code não-zero).
+  encontrado, sessão expirada, exit code não-zero). Aceitam um `onChunk`
+  opcional ligado direto no stream de stdout do processo — só repassa o
+  que o CLI subjacente realmente escreve, sem simular nada nesse nível.
 - **`src/storage/history.ts`** — persistência em SQLite
   (`~/.orquestrador/history.db`). Cada etapa grava `fed_by_step_id`
   apontando pro id da etapa anterior cujo output virou seu contexto —
@@ -244,7 +255,10 @@ orquestrador history --last
   `listRuns()` sem alterar nada neles; tem sua própria versão do prompt de
   ambiguidade (via estado do React, não `readline`) porque Ink assume o
   controle do terminal. O input de texto (`PromptInput.tsx`) também é
-  implementação própria, não `ink-text-input` — ver "Testes" abaixo.
+  implementação própria, não `ink-text-input` — ver "Testes" abaixo. Pro
+  streaming, `App.tsx` passa `onStepStart`/`onChunk`/`onStepComplete` pro
+  `runPipeline()` e só acumula o que chega num estado local — a decisão de
+  "é real ou simulado" já vem pronta do pipeline, a tela só exibe.
 
 ## Testes
 
@@ -258,10 +272,14 @@ Os testes de `router.ts` e `pipeline.ts` mockam os wrappers de agente
 verdade**. Cobrem: as 4 combinações de roteamento por palavra-chave, as 3
 classificações possíveis do `--auto` (mais falha e resposta inesperada),
 `--agent` forçado, split com handoff de contexto, tarefa ambígua com e sem
-resolvedor, cancelamento, falha de agente propagando erro, e `runPipelines`
+resolvedor, cancelamento, falha de agente propagando erro, `runPipelines`
 (mapeamento tarefa → resultado, falha parcial isolada, tarefa ambígua no
 lote virando erro pontual, e uma checagem de que a execução é concorrente de
-verdade — tempo total bem abaixo da soma dos delays individuais).
+verdade — tempo total bem abaixo da soma dos delays individuais), e
+streaming (chunks reais repassados sem passar pela simulação pro agente que
+streama de verdade, a simulação reconstruindo o texto original sem perda
+pro agente que não streama, e cada etapa virando uma entrada de resultado
+assim que ela termina — sem esperar o resto do plano).
 
 `src/tui/commands.ts` (o parsing de slash command e o estado de modo da
 TUI) também tem testes — é lógica pura, sem depender de renderizar a tela
@@ -307,9 +325,12 @@ histórico completo.
   há uma dependência real de dados ali, não dá pra paralelizar.
 - Sem sintaxe pra forçar um agente diferente por tarefa individual no modo
   de várias tarefas — `--agent`/`--auto` valem pro lote inteiro.
-- Modo interativo (`orquestrador` sem argumentos) não tem streaming de
-  output ao vivo (spinner até terminar, igual ao `run`) e não roda tarefas
-  em paralelo dentro da tela — uma tarefa de cada vez, tipo chat.
+- Modo interativo (`orquestrador` sem argumentos) não roda tarefas em
+  paralelo dentro da tela — uma de cada vez, tipo chat.
+- O streaming do Claude Code é sempre simulado (`(simulando…)`) — `claude
+  -p` não escreve stdout de forma incremental em modo não-interativo,
+  então não tem como ter streaming real dele hoje. Se isso mudar no
+  futuro, é só atualizar `AGENT_STREAMS_INCREMENTALLY` em `types.ts`.
 - `--dangerously-skip-permissions` do Claude Code nunca é habilitado por
   este projeto.
 
