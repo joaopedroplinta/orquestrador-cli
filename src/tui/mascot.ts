@@ -5,11 +5,40 @@
 // pedido explícito foi não quebrar em terminais estreitos, e ASCII simples
 // é o que tem menos chance de sair torto em qualquer terminal.
 
-// ~13 caracteres de largura, 5 linhas — cabe folgado mesmo num terminal de
-// 40 colunas. Corpo/olhos em cor padrão; bico e pés (índices 2 e 4) ganham
-// destaque amarelo em MascotBanner (Mascot.tsx) — decisão só visual, sem
-// lógica pra testar, por isso fica hardcoded no componente, não aqui.
-export const MASCOT_BANNER_LINES: readonly string[] = ["   ___", "  /o o\\", " (  >  )", "  \\___/", "  d   b"];
+// ~13 caracteres de largura, 7 linhas — cabe folgado mesmo num terminal de
+// 40 colunas. Cor (branco/cinza pro corpo) fica hardcoded em MascotBanner
+// (Mascot.tsx) — decisão só visual, sem lógica pra testar, por isso não
+// mora aqui.
+export const MASCOT_BANNER_LINES: readonly string[] = [
+  "      .--.",
+  "     |o_o |",
+  "     |:_/ |",
+  "    //   \\ \\",
+  "   (|     | )",
+  "  /'\\_   _/`\\",
+  "  \\___)=(___/",
+];
+
+// Versão compacta pra terminal muito estreito — mesma "cara" (cabeça +
+// olhos + bico), sem corpo/pés, pra caber mesmo numa largura mínima.
+export const MASCOT_BANNER_LINES_COMPACT: readonly string[] = [" .--.", "|o_o|", "'--'"];
+
+// Abaixo desse número de colunas, `selectMascotBannerLines` troca pra
+// versão compacta. Validado com PTY real (ver CLAUDE.md): a arte completa
+// (13 colunas de conteúdo + borda/padding da caixa do banner) já não sobra
+// margem confortável perto disso — a versão compacta (5 colunas) segura
+// terminais bem mais estreitos sem quebrar linha dentro da caixa.
+export const MASCOT_COMPACT_THRESHOLD_COLUMNS = 30;
+
+// `columns` é `process.stdout.columns` — `undefined` quando não dá pra
+// medir (ex.: stdout não é um TTY de verdade), caso em que assume a arte
+// completa (mesmo comportamento de antes dessa função existir).
+export function selectMascotBannerLines(columns: number | undefined): readonly string[] {
+  if (columns !== undefined && columns < MASCOT_COMPACT_THRESHOLD_COLUMNS) {
+    return MASCOT_BANNER_LINES_COMPACT;
+  }
+  return MASCOT_BANNER_LINES;
+}
 
 // Animação "pensando" — mostrada no lugar do spinner padrão enquanto uma
 // etapa roda. 4 frames, ciclando enquanto a tarefa não termina.

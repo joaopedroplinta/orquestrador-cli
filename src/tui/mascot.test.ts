@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { MASCOT_BANNER_LINES, MASCOT_THINKING_FRAMES, mascotFaceFor, mascotThinkingFrame } from "./mascot.js";
+import {
+  MASCOT_BANNER_LINES,
+  MASCOT_BANNER_LINES_COMPACT,
+  MASCOT_COMPACT_THRESHOLD_COLUMNS,
+  MASCOT_THINKING_FRAMES,
+  mascotFaceFor,
+  mascotThinkingFrame,
+  selectMascotBannerLines,
+} from "./mascot.js";
 
 describe("mascotThinkingFrame", () => {
   it("cicla pelos frames na ordem, do primeiro ao último", () => {
@@ -52,5 +60,34 @@ describe("MASCOT_BANNER_LINES", () => {
       // eslint-disable-next-line no-control-regex
       expect(/^[\x00-\x7F]*$/.test(line)).toBe(true);
     }
+  });
+});
+
+describe("MASCOT_BANNER_LINES_COMPACT", () => {
+  it("é mais estreita e mais baixa que a versão completa, e também só ASCII puro", () => {
+    const fullWidth = Math.max(...MASCOT_BANNER_LINES.map((l) => l.length));
+    const compactWidth = Math.max(...MASCOT_BANNER_LINES_COMPACT.map((l) => l.length));
+    expect(compactWidth).toBeLessThan(fullWidth);
+    expect(MASCOT_BANNER_LINES_COMPACT.length).toBeLessThan(MASCOT_BANNER_LINES.length);
+    for (const line of MASCOT_BANNER_LINES_COMPACT) {
+      // eslint-disable-next-line no-control-regex
+      expect(/^[\x00-\x7F]*$/.test(line)).toBe(true);
+    }
+  });
+});
+
+describe("selectMascotBannerLines", () => {
+  it("usa a arte completa quando a largura não é conhecida (undefined)", () => {
+    expect(selectMascotBannerLines(undefined)).toBe(MASCOT_BANNER_LINES);
+  });
+
+  it("usa a arte completa quando o terminal é largo o suficiente", () => {
+    expect(selectMascotBannerLines(MASCOT_COMPACT_THRESHOLD_COLUMNS)).toBe(MASCOT_BANNER_LINES);
+    expect(selectMascotBannerLines(120)).toBe(MASCOT_BANNER_LINES);
+  });
+
+  it("troca pra versão compacta quando o terminal é mais estreito que o limiar", () => {
+    expect(selectMascotBannerLines(MASCOT_COMPACT_THRESHOLD_COLUMNS - 1)).toBe(MASCOT_BANNER_LINES_COMPACT);
+    expect(selectMascotBannerLines(10)).toBe(MASCOT_BANNER_LINES_COMPACT);
   });
 });

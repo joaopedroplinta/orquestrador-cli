@@ -11,6 +11,8 @@ export type ParsedInput =
   | { kind: "toggle-auto" }
   | { kind: "set-routing"; routing: RoutingStrategy }
   | { kind: "toggle-mascot" }
+  /** Easter egg escondido — de propósito NÃO aparece na mensagem de "comando desconhecido" abaixo nem em nenhum /help. */
+  | { kind: "show-pinguim" }
   | { kind: "error"; message: string };
 
 function isRoutingStrategy(value: string): value is RoutingStrategy {
@@ -65,6 +67,8 @@ export function parseInput(raw: string): ParsedInput {
       };
     case "mascot":
       return { kind: "toggle-mascot" };
+    case "pinguim":
+      return { kind: "show-pinguim" };
     default:
       return {
         kind: "error",

@@ -624,16 +624,22 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
       cabeçalho `=== Tarefa i/N ===` por resultado conforme chegam).
       `printResult`/`printError` foram extraídas em `cli.ts` pra serem
       reaproveitadas pelos dois modos.
-- [x] Testes automatizados com Vitest (171 casos):
-  - `src/tui/mascot.test.ts` (8 testes) — `mascotThinkingFrame` cicla pelos
+- [x] Testes automatizados com Vitest (180 casos):
+  - `src/tui/mascot.test.ts` (12 testes) — `mascotThinkingFrame` cicla pelos
     4 frames na ordem certa e dá a volta (wrap-around) depois do último em
     vez de `undefined`/travar (inclusive depois de várias voltas
     completas); `mascotFaceFor` devolve uma carinha diferente pra cada
     estado (sucesso/erro/cancelado), as três distintas entre si, e do
     mesmo tamanho da carinha de "pensando" (mesmo personagem reagindo,
-    não um desenho diferente); e a arte do banner tem altura/largura
+    não um desenho diferente); a arte do banner tem altura/largura
     modestas (≤8 linhas, ≤20 colunas por linha) e é só ASCII puro
-    (regex `^[\x00-\x7F]*$`), sem depender de renderizar nada.
+    (regex `^[\x00-\x7F]*$`), sem depender de renderizar nada; a versão
+    compacta (`MASCOT_BANNER_LINES_COMPACT`) é comprovadamente mais estreita
+    e mais baixa que a completa, também só ASCII puro; e
+    `selectMascotBannerLines` troca pra compacta abaixo de
+    `MASCOT_COMPACT_THRESHOLD_COLUMNS` e mantém a completa acima dele
+    (inclusive com `columns: undefined`, quando não dá pra medir a largura
+    do terminal).
   - `src/reporting.test.ts` — `buildMarkdownReport` com `HistoryRun`
     mockado (sem SQLite de verdade): título/metadados/contagem de etapas,
     heading de etapa com duração formatada e "alimentada pela etapa #N"
@@ -756,9 +762,12 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
   - `src/tui/commands.test.ts` — `parseInput` (task vs. cada slash command,
     case insensitivity, `/agent`/`/routing` com argumento inválido/ausente
     virando erro, `/mascot` virando `toggle-mascot` (sem argumento, é só um
-    liga/desliga), comando desconhecido vira erro, `;`-separado com 2+
-    partes não-vazias virando `{ kind: "tasks" }`, e `;` solto/sobrando no
-    final caindo de volta pro `{ kind: "task" }` original) e
+    liga/desliga), `/pinguim` reconhecido como `{ kind: "show-pinguim" }`
+    (case-insensitive) e confirmadamente ausente da mensagem de "comando
+    desconhecido" (é o que mantém o easter egg escondido), comando
+    desconhecido vira erro, `;`-separado com 2+ partes não-vazias virando
+    `{ kind: "tasks" }`, e `;` solto/sobrando no final caindo de volta pro
+    `{ kind: "task" }` original) e
     `applyModeCommand` (`/agent` mudando `forcedAgent`, `/agent auto`
     resetando pra `null` mantendo o resto do estado, `/auto` alternando
     `autoMode` duas vezes, `/routing classify` mudando a estratégia mantendo
@@ -807,7 +816,14 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
     mostra a carinha feliz (`(^ ^)`) junto do resultado, tarefa com erro
     mostra a carinha confusa (`(? ?)`) junto da mensagem, cancelamento
     mostra a carinha neutra (`(- -)`), e com o mascote desligado nenhuma
-    carinha aparece em lugar nenhum (nem a de pensando, nem a de reação).
+    carinha aparece em lugar nenhum (nem a de pensando, nem a de reação);
+    mais 3 testes de `/pinguim` (easter egg escondido): assume a tela
+    inteira (arte Braille + "pressione qualquer tecla pra voltar") e some
+    do chat normal (placeholder do input não aparece mais), qualquer tecla
+    dispensa e volta pro chat normal (placeholder reaparece), e nada
+    relacionado ao easter egg aparece em nenhum canto da UI normal
+    (`StatusLine`, lista de comandos do banner) fora do que o comando em si
+    dispara.
   - `src/config.test.ts` (18 testes) — `parseOrquestradorConfig` (config
     completo válido, objeto vazio, JSON inválido, JSON que não é objeto,
     cada campo validado e descartado independentemente com seu próprio
@@ -989,8 +1005,36 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
       só o par do meio muda). Liga por padrão; `orquestrador --no-mascot`
       desliga na abertura, `/mascot` alterna a qualquer momento dentro da
       tela. Sem carinha por tarefa no modo em lote (`;`) — decisão de
-      escopo, ver Convenções. Arte só ASCII puro (sem Unicode largo), de
-      propósito, pra não quebrar em terminal estreito.
+      escopo, ver Convenções. Arte do banner é um pinguim de corpo inteiro
+      (`MASCOT_BANNER_LINES`, 7 linhas × 13 colunas), em branco/cinza
+      (`whiteBright` via Ink, deixado explícito pra contraste em vez de
+      herdar a cor padrão do terminal); troca sozinha pra uma versão
+      compacta (`MASCOT_BANNER_LINES_COMPACT`, só a cabeça) quando o
+      terminal tem menos de `MASCOT_COMPACT_THRESHOLD_COLUMNS` (30) colunas
+      — `selectMascotBannerLines(process.stdout.columns)` decide isso em
+      `MascotBanner` (Mascot.tsx). Validado com PTY real em 100/40/25/15
+      colunas (ver "Testado manualmente"): a arte completa nunca quebra
+      linha dentro da caixa até 40 colunas, e a compacta segura até 15 sem
+      problema — não foi preciso um terceiro nível ainda mais compacto.
+      Arte só ASCII puro (sem Unicode largo), de propósito, pra não
+      quebrar em terminal estreito.
+- [x] `/pinguim` — easter egg escondido na TUI: comando reconhecido em
+      `parseInput` (`commands.ts`) mas **deliberadamente ausente** da
+      mensagem de "comando desconhecido" (a única "lista de comandos" que
+      existe hoje, já que não há `/help` dedicado) — só documentado como
+      curiosidade no README. Mostra uma versão grande do mascote em arte
+      Braille (`src/tui/pinguimBraille.ts`) em tela cheia
+      (`PinguimFullscreen.tsx`): `App.tsx` faz um early return trocando a
+      árvore inteira por esse componente enquanto `showingPinguim` é
+      `true`, sem tocar em `ModeState`/transcript; qualquer tecla
+      (`useInput` sem filtro, mesmo padrão de `PromptInput.tsx`) dispensa e
+      volta pro chat normal. **Não é uma alt-screen de terminal de
+      verdade** (Ink não expõe isso) — só substitui o que é renderizado, o
+      scrollback anterior continua acima. **A arte em `pinguimBraille.ts`
+      é um placeholder decorativo** — o usuário pediu o easter egg antes de
+      enviar a arte Braille de verdade; substituir o array
+      `PINGUIM_BRAILLE_ART` inteiro assim que ela chegar, sem mexer no
+      resto da feature (ver Pendências).
 - [x] `package.json` pronto pra `npm publish` (mas ainda **não publicado**
       de verdade): metadata completo (`name`, `version`, `description`,
       `bin`, `license`, `repository`/`bugs`/`homepage` apontando pro
@@ -1191,6 +1235,20 @@ teste sempre limpo depois):
   `StatusLine` mostrando "agente: claude (forçado)" antes de qualquer
   interação do usuário — confirmando o seeding do `ModeState` inicial a
   partir do config.
+- Pinguim novo (banner) + `/pinguim`, com PTY real em várias larguras de
+  terminal (100/40/25/15 colunas): a arte completa apareceu corretamente
+  em 100 e 40 colunas sem quebrar linha dentro da caixa do banner; em 25 e
+  15 colunas, trocou sozinha pra versão compacta (`.--.`/`|o_o|`/`'--'`),
+  também sem quebrar — confirmando que o limiar de
+  `MASCOT_COMPACT_THRESHOLD_COLUMNS` (30) funciona na prática, não só nos
+  testes unitários com `columns` mockado. `/pinguim` (digitado caractere a
+  caractere, Enter separado — digitar tudo de uma vez incluindo o `\r`
+  embutido reproduz o comportamento documentado de "colar texto" do
+  `PromptInput.tsx`, que descarta o `\r` de propósito, não é bug)
+  substituiu a tela inteira pela arte Braille + "pressione qualquer tecla
+  pra voltar"; uma tecla qualquer (`q`) devolveu a tela normal, com o
+  histórico de scrollback anterior intacto acima — sem `EIO`/
+  `uncaughtException` no log da sessão.
 
 Cinco bugs reais encontrados e corrigidos durante o desenvolvimento:
 
@@ -1339,7 +1397,18 @@ Cinco bugs reais encontrados e corrigidos durante o desenvolvimento:
   cor/skin/expressões) — não foi pedido, e adicionar isso agora seria
   configuração especulativa sem uso real. Sem carinha por tarefa no modo
   em lote (`;`) — decisão de escopo consciente, ver Convenções, não uma
-  limitação técnica.
+  limitação técnica. A arte do banner só tem dois níveis (completa/
+  compacta) — validado com PTY real que isso já cobre de 100 até 15
+  colunas sem quebrar, então um terceiro nível "ainda mais compacto" não
+  foi implementado por falta de necessidade demonstrada, não por
+  esquecimento.
+- **`PINGUIM_BRAILLE_ART` (`src/tui/pinguimBraille.ts`), usada pelo easter
+  egg `/pinguim`, é um placeholder decorativo, não a arte de verdade** — o
+  usuário pediu a feature funcionando antes de enviar a arte Braille real
+  separadamente. Substituir o array inteiro assim que ela chegar; nenhuma
+  outra parte da feature (parsing em `commands.ts`, `PinguimFullscreen.tsx`,
+  o early return em `App.tsx`) depende do conteúdo específico da arte, só
+  do formato (array de `string`s, uma por linha).
 - `.orquestradorrc`: só o arquivo mais próximo do cwd é considerado — um
   monorepo com config na raiz e outro numa subpasta não faz merge dos
   dois, o de baixo simplesmente vence por inteiro. `maxRetries`/

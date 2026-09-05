@@ -17,6 +17,7 @@ import {
 import { applyModeCommand, INITIAL_MODE_STATE, parseInput, type ModeState } from "./commands.js";
 import { MascotBanner, MascotSpinner } from "./Mascot.js";
 import { mascotFaceFor, type MascotOutcome } from "./mascot.js";
+import PinguimFullscreen from "./PinguimFullscreen.js";
 import PromptInput from "./PromptInput.js";
 
 /** Tarefas separadas por ";" numa linha só ganham essa marca pra mostrar "Tarefa i/N" no transcript. */
@@ -196,6 +197,9 @@ export default function App({
   const [streamingAgent, setStreamingAgent] = useState<AgentName | null>(null);
   const [streamingOutput, setStreamingOutput] = useState("");
   const [liveTasks, setLiveTasks] = useState<LiveTask[] | null>(null);
+  // Easter egg escondido ("/pinguim", ver commands.ts) — quando true, substitui
+  // a tela inteira (early return mais abaixo) até qualquer tecla ser apertada.
+  const [showingPinguim, setShowingPinguim] = useState(false);
 
   useEffect(() => {
     if (status !== "running") {
@@ -480,6 +484,9 @@ export default function App({
         case "error":
           addEntry({ kind: "error", id: randomUUID(), message: parsed.message });
           return;
+        case "show-pinguim":
+          setShowingPinguim(true);
+          return;
         case "task":
           void runTask(parsed.text);
           return;
@@ -490,6 +497,10 @@ export default function App({
     },
     [status, pendingAgentPrompt, mode, addEntry, exit, showHistory, runTask, runTasksInParallel],
   );
+
+  if (showingPinguim) {
+    return <PinguimFullscreen onDismiss={() => setShowingPinguim(false)} />;
+  }
 
   return (
     <Box flexDirection="column">

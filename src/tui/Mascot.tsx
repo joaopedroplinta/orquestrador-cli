@@ -1,17 +1,18 @@
 import { Box, Text } from "ink";
 import { useEffect, useState } from "react";
-import { MASCOT_BANNER_LINES, mascotThinkingFrame } from "./mascot.js";
+import { mascotThinkingFrame, selectMascotBannerLines } from "./mascot.js";
 
-// Índices de MASCOT_BANNER_LINES que ganham destaque amarelo (bico e pés) —
-// puramente visual, por isso fica aqui e não em mascot.ts (que só guarda o
-// que precisa ser testável).
-const ACCENT_LINE_INDEXES = new Set([2, 4]);
+// Corpo em branco/cinza claro (contraste em fundo escuro OU claro) — o
+// contorno da caixa do banner (Box borderColor="cyan" em App.tsx) continua
+// com a cor padrão do projeto, sem mexer nela aqui.
+const MASCOT_BODY_COLOR = "whiteBright";
 
 export function MascotBanner() {
+  const lines = selectMascotBannerLines(process.stdout.columns);
   return (
     <Box flexDirection="column">
-      {MASCOT_BANNER_LINES.map((line, i) => (
-        <Text key={i} color={ACCENT_LINE_INDEXES.has(i) ? "yellow" : undefined}>
+      {lines.map((line, i) => (
+        <Text key={i} color={MASCOT_BODY_COLOR}>
           {line}
         </Text>
       ))}

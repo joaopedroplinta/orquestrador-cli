@@ -108,11 +108,13 @@ roda, e reage no final — carinha feliz `(^ ^)` no sucesso, confusa `(? ?)`
 no erro, neutra `(- -)` no cancelamento. Assim fica:
 
 ```
-   ___
-  /o o\
- (  >  )
-  \___/
-  d   b
+      .--.
+     |o_o |
+     |:_/ |
+    //   \ \
+   (|     | )
+  /'\_   _/`\
+  \___)=(___/
 ⚡ orquestrador
 Orquestra Claude Code + Antigravity numa mesma tarefa.
 Digite uma tarefa e aperte Enter. Separe por ; pra rodar várias em paralelo.
@@ -128,12 +130,17 @@ A versão mais recente do Node.js é a 24.x...
 
 Desligue com `orquestrador --no-mascot` (só funciona sem nenhuma outra
 flag/subcomando — é específico do modo interativo) ou alterne a qualquer
-momento dentro da tela com `/mascot`. A arte é só ASCII puro, bem estreita
-(a linha mais larga tem 8 caracteres), então não deve quebrar nem em
-terminais bem estreitos. **Não tem uma carinha por tarefa no modo em lote
-(`;`)** — o mascote aparece só no spinner/reação de tarefa única e no
-resumo "Rodando N tarefas em paralelo", pra não virar N pinguins piscando
-ao mesmo tempo.
+momento dentro da tela com `/mascot`. A arte é só ASCII puro; num terminal
+estreito (abaixo de ~30 colunas) ela troca sozinha pra uma versão compacta
+(só a cabeça: `.--.` / `|o_o|` / `'--'`), pra nunca quebrar linha dentro da
+caixa do banner. **Não tem uma carinha por tarefa no modo em lote (`;`)** —
+o mascote aparece só no spinner/reação de tarefa única e no resumo
+"Rodando N tarefas em paralelo", pra não virar N pinguins piscando ao
+mesmo tempo.
+
+**Curiosidade — `/pinguim`:** um comando escondido (não aparece em nenhuma
+lista de comandos da tela) que mostra uma versão grande, em arte Braille,
+do mascote em tela cheia. Qualquer tecla volta pro chat normal.
 
 **Múltiplas tarefas em paralelo, na mesma linha:** separe as tarefas por
 `;` e aperte Enter uma vez só:
@@ -575,11 +582,16 @@ modo inicial da tela (ainda dá pra trocar depois com `/agent`/`/routing`/
   dinamicamente `src/tui/startTui.tsx` — quem só usa `run`/`history`/
   `export` não paga o custo de carregar Ink/React.
 - **`src/tui/`** — tela interativa em Ink/React (`App.tsx` + `startTui.tsx`
-  + `commands.ts` + `PromptInput.tsx` + `mascot.ts`/`Mascot.tsx`). O
-  mascote segue a mesma separação de `commands.ts`: `mascot.ts` é dado/
-  lógica pura (arte ASCII, seleção de frame por estado — testável),
-  `Mascot.tsx` são os componentes Ink que consomem isso (`MascotBanner`,
-  `MascotSpinner`, sem lógica própria pra testar). Reaproveita `runPipeline()` e
+  + `commands.ts` + `PromptInput.tsx` + `mascot.ts`/`Mascot.tsx` +
+  `pinguimBraille.ts`/`PinguimFullscreen.tsx`). O mascote segue a mesma
+  separação de `commands.ts`: `mascot.ts` é dado/lógica pura (arte ASCII do
+  banner — completa e uma versão compacta pra terminal estreito — e
+  seleção de frame por estado — testável), `Mascot.tsx` são os componentes
+  Ink que consomem isso (`MascotBanner`, `MascotSpinner`, sem lógica
+  própria pra testar). `/pinguim` (comando escondido — ver "Mascote"
+  acima) é servido por `pinguimBraille.ts` (só a arte, em Braille) e
+  `PinguimFullscreen.tsx` (componente Ink que assume a tela inteira via
+  early return em `App.tsx`, dispensado por qualquer tecla). Reaproveita `runPipeline()` e
   `listRuns()` sem alterar nada neles; tem sua própria versão do prompt de
   ambiguidade (via estado do React, não `readline`) porque Ink assume o
   controle do terminal. O input de texto (`PromptInput.tsx`) também é
@@ -721,19 +733,26 @@ roteamento normal, `/auto` alternando o estado, `/routing keyword|classify`
 mudando a estratégia mantendo o resto do estado, `/mascot` alternando
 `mascotEnabled`, os quatro sendo independentes entre si, comando
 desconhecido/argumento inválido sempre virando erro (nunca uma tarefa,
-nunca uma exceção), 2+ tarefas separadas por `;` virando `{ kind: "tasks"
-}` com os textos aparados, e `;` solto ou sobrando no final caindo de
-volta pro `{ kind: "task" }` original.
+nunca uma exceção), `/pinguim` sendo reconhecido como `{ kind:
+"show-pinguim" }` (case-insensitive, igual aos demais comandos) sem NUNCA
+aparecer na mensagem de "comando desconhecido" (é o que mantém o easter
+egg escondido), 2+ tarefas separadas por `;` virando `{ kind: "tasks" }`
+com os textos aparados, e `;` solto ou sobrando no final caindo de volta
+pro `{ kind: "task" }` original.
 
-`src/tui/mascot.test.ts` cobre a lógica de seleção de frame do mascote —
-sem testar a arte em si: `mascotThinkingFrame` cicla pelos 4 frames de
-"pensando" na ordem certa e dá a volta (wrap-around) depois do último em
-vez de travar ou retornar `undefined`, `mascotFaceFor` devolve uma
-carinha diferente pra cada estado (sucesso/erro/cancelado, as três
-distintas entre si e do mesmo tamanho da carinha de "pensando", pra
-parecer o mesmo personagem reagindo), e a arte do banner tem altura/
-largura modestas e é só ASCII puro (sem caractere multi-byte que possa
-sair torto em terminal limitado).
+`src/tui/mascot.test.ts` cobre a lógica de seleção de frame/arte do
+mascote — sem testar a arte em si pixel a pixel: `mascotThinkingFrame`
+cicla pelos 4 frames de "pensando" na ordem certa e dá a volta
+(wrap-around) depois do último em vez de travar ou retornar `undefined`,
+`mascotFaceFor` devolve uma carinha diferente pra cada estado
+(sucesso/erro/cancelado, as três distintas entre si e do mesmo tamanho da
+carinha de "pensando", pra parecer o mesmo personagem reagindo), a arte
+do banner (completa e a versão compacta) tem altura/largura modestas e é
+só ASCII puro (sem caractere multi-byte que possa sair torto em terminal
+limitado), a compacta é comprovadamente menor que a completa em largura e
+altura, e `selectMascotBannerLines` troca pra compacta abaixo do limiar de
+colunas configurado e mantém a completa acima dele (inclusive quando a
+largura do terminal não dá pra medir, `undefined`).
 
 `src/tui/App.tsx` (o componente Ink em si) também tem cobertura, via
 [`ink-testing-library`](https://github.com/vadimdemedes/ink-testing-library)
@@ -763,7 +782,10 @@ ao `--no-mascot`), `/mascot` alterna e reflete na `StatusLine`, o frame de
 "pensando" aparece no lugar do spinner padrão enquanto uma tarefa roda, as
 carinhas de sucesso/erro/cancelamento aparecem junto do resultado
 correspondente, e com o mascote desligado nenhuma carinha aparece em
-lugar nenhum.
+lugar nenhum; e `/pinguim`: assume a tela inteira (mostrando a arte
+Braille e escondendo o chat normal), qualquer tecla dispensa e volta pro
+chat normal, e nada relacionado ao easter egg aparece em lugar nenhum da
+UI normal (nem `StatusLine`, nem lista de comandos do banner).
 `promptForAgent` (`src/cli.ts`, o fallback
 interativo do modo não-TUI) continua sem teste automatizado — é
 `readline` puro, sem a alternativa de um stdin falso.

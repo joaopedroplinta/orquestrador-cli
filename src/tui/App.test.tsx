@@ -464,12 +464,12 @@ describe("App (TUI) — mascote", () => {
   it("o banner mostra o pinguim por padrão (mascote ligado)", () => {
     const { lastFrame } = render(<App />);
     // Uma das linhas da arte do banner — ver mascot.ts (MASCOT_BANNER_LINES).
-    expect(lastFrame()).toContain("/o o\\");
+    expect(lastFrame()).toContain("|o_o |");
   });
 
   it("--no-mascot (initialMascotEnabled=false) tira o pinguim do banner e da StatusLine", () => {
     const { lastFrame } = render(<App initialMascotEnabled={false} />);
-    expect(lastFrame()).not.toContain("/o o\\");
+    expect(lastFrame()).not.toContain("|o_o |");
     expect(lastFrame()).toContain("mascote: desligado");
   });
 
@@ -556,5 +556,33 @@ describe("App (TUI) — mascote", () => {
 
     expect(lastFrame()).not.toContain("(^ ^)");
     expect(lastFrame()).not.toContain("(o o)");
+  });
+});
+
+describe("App (TUI) — /pinguim (easter egg escondido)", () => {
+  it("assume a tela inteira com a arte Braille e some do chat normal", async () => {
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "/pinguim");
+
+    expect(lastFrame()).toContain("pressione qualquer tecla pra voltar");
+    // Enquanto em tela cheia, o chat normal (prompt/placeholder) não aparece.
+    expect(lastFrame()).not.toContain("digite uma tarefa...");
+  });
+
+  it("qualquer tecla dispensa a tela cheia e volta pro chat normal", async () => {
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "/pinguim");
+    expect(lastFrame()).toContain("pressione qualquer tecla pra voltar");
+
+    stdin.write("x");
+    await tick();
+
+    expect(lastFrame()).not.toContain("pressione qualquer tecla pra voltar");
+    expect(lastFrame()).toContain("digite uma tarefa...");
+  });
+
+  it("não é mencionado em nenhum lugar visível da UI normal (nem StatusLine, nem lista de comandos do banner)", () => {
+    const { lastFrame } = render(<App />);
+    expect(lastFrame()).not.toContain("pinguim");
   });
 });

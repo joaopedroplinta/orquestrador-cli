@@ -71,6 +71,18 @@ describe("parseInput", () => {
     }
   });
 
+  it('"/pinguim" é reconhecido (easter egg escondido — não é um comando desconhecido)', () => {
+    expect(parseInput("/pinguim")).toEqual({ kind: "show-pinguim" });
+    expect(parseInput("/PINGUIM")).toEqual({ kind: "show-pinguim" }); // case-insensitive como os demais
+  });
+
+  it('"/pinguim" não aparece na lista de comandos da mensagem de erro (continua escondido)', () => {
+    const result = parseInput("/foo");
+    if (result.kind === "error") {
+      expect(result.message).not.toContain("pinguim");
+    }
+  });
+
   it("é case-insensitive pro nome do comando e do argumento do agente/roteamento", () => {
     expect(parseInput("/AGENT CLAUDE")).toEqual({ kind: "set-agent", agent: "claude" });
     expect(parseInput("/HISTORY")).toEqual({ kind: "history" });
