@@ -424,6 +424,14 @@ orquestrador --no-mascot                 # idem, mas sem o pinguim ASCII (també
 - **A partir de agora, trabalho por branch + PR, nunca commit direto na
   `main`.** Toda mudança nova nasce numa branch (`feature/...`), e ao
   terminar abro PR via `gh pr create` pra revisão.
+- **Nunca tire o script `postbuild` (`chmod +x dist/cli.js`) do
+  `package.json`.** `tsc` não seta nem preserva o bit de execução nos
+  arquivos que gera — sem esse script, `dist/` recriado do zero
+  (`rm -rf dist && npm run build`, algo que já apareceu várias vezes só
+  neste histórico de validação manual) quebra o binário linkado
+  globalmente (`npm link`) com "permissão negada", mesmo o projeto
+  continuando 100% funcional via `node dist/cli.js` — é um bug real que já
+  aconteceu (bug #5), não uma precaução teórica.
 
 ## Adicionando um novo agente
 
@@ -1026,7 +1034,7 @@ teste sempre limpo depois):
   era só a flakiness de timing do pexpect já documentada aqui, não um bug:
   com retry, `/mascot` funcionou na primeira tentativa de verdade).
 
-Quatro bugs reais encontrados e corrigidos durante o desenvolvimento:
+Cinco bugs reais encontrados e corrigidos durante o desenvolvimento:
 
 1. `rl.question()` sequencial do `node:readline/promises` trava
    indefinidamente quando o stdin é um pipe/não-TTY (a segunda chamada
@@ -1082,6 +1090,19 @@ Quatro bugs reais encontrados e corrigidos durante o desenvolvimento:
    a implementação antiga via `ink-text-input` e falham lá, provando que
    não são triviais); (b) PTY real com digitação + backspace + tarefa real,
    confirmando que o texto final bate exatamente com o que foi digitado.
+5. **`dist/cli.js` perdia o bit de execução (`chmod +x`) toda vez que
+   `dist/` era recriado do zero** (`rm -rf dist && npm run build`) —
+   `tsc` não preserva nem seta permissão de execução nos arquivos que
+   gera, então o binário linkado globalmente (`npm link`, usado por quem
+   desenvolve o projeto — `bin.orquestrador` aponta pra `./dist/cli.js`)
+   passava a falhar com `permissão negada` ao rodar `orquestrador`
+   direto (funcionava normal via `node dist/cli.js`, só o *shebang* direto
+   quebrava). Descoberto quando o usuário reportou erro rodando
+   `orquestrador` depois de uma sessão com vários `rm -rf dist && npm run
+   build` de validação. Corrigido com um script `postbuild` em
+   `package.json` (`chmod +x dist/cli.js`, roda automaticamente depois de
+   `npm run build`, convenção nativa do npm de pre/post script) — não
+   depende de lembrar de rodar `chmod` manualmente depois de build nenhum.
 
 ## Pendências conhecidas (pós-MVP)
 
