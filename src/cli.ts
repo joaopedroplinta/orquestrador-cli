@@ -2,10 +2,12 @@
 import chalk from "chalk";
 import { Command } from "commander";
 import ora, { type Ora } from "ora";
+import { writeFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { isAgentName } from "./agents/registry.js";
 import { runPipeline, runPipelines, type PipelineResult } from "./orchestrator/pipeline.js";
-import { getLastRun, listRuns } from "./storage/history.js";
+import { buildMarkdownReport, formatUsdCost, totalCostUsd, usageLine } from "./reporting.js";
+import { getLastRun, getRunById, listRuns } from "./storage/history.js";
 import {
   AgentError,
   PipelineCancelledError,
@@ -188,6 +190,29 @@ program
   });
 
 program
+  .command("export <runId>")
+  .description(
+    "Gera um relatório em markdown de uma execução do histórico (id completo ou o prefixo de 8 caracteres mostrado em history)",
+  )
+  .option("-o, --output <arquivo>", "Escreve o relatório num arquivo em vez de imprimir no stdout")
+  .action((runId: string, opts: { output?: string }) => {
+    const run = getRunById(runId);
+    if (!run) {
+      console.error(chalk.red(`Nenhuma execução encontrada com id "${runId}".`));
+      process.exitCode = 1;
+      return;
+    }
+
+    const report = buildMarkdownReport(run);
+    if (opts.output) {
+      writeFileSync(opts.output, report, "utf8");
+      console.log(chalk.green(`Relatório salvo em ${opts.output}`));
+    } else {
+      console.log(report);
+    }
+  });
+
+program
   .command("history")
   .description("Lista execuções passadas")
   .option("--last", "Mostra detalhes da última execução")
@@ -200,11 +225,19 @@ program
       }
       console.log(chalk.bold(`Run ${run.id} — ${run.task}`));
       console.log(`Início: ${run.startedAt}${run.finishedAt ? `  Fim: ${run.finishedAt}` : ""}`);
+      const cost = totalCostUsd(run.steps);
+      if (cost) {
+        const partial = cost.stepsWithCost < run.steps.length;
+        const note = partial ? chalk.dim(` (${cost.stepsWithCost}/${run.steps.length} etapas reportaram custo — parcial)`) : "";
+        console.log(chalk.bold(`Custo total reportado: ${formatUsdCost(cost.total)}`) + note);
+      }
       for (const step of run.steps) {
         const handoff = step.fedByStepId ? chalk.dim(` (alimentada pela etapa #${step.fedByStepId})`) : "";
         const retryTag = step.retries?.length ? chalk.yellow(` (${step.retries.length} retry(s))`) : "";
         console.log(chalk.bold(`\n[step #${step.id} — ${step.agent}] (${step.durationMs}ms)${handoff}${retryTag}`));
         console.log(chalk.dim(`Prompt: ${step.prompt}`));
+        const usage = usageLine(step.usage);
+        if (usage) console.log(chalk.dim(usage));
         if (step.retries?.length) {
           for (const retry of step.retries) {
             console.log(chalk.dim(`  tentativa ${retry.attempt} falhou (${retry.kind}): ${retry.message}`));

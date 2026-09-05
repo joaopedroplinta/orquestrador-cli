@@ -175,6 +175,26 @@ describe("runPipeline", () => {
   });
 });
 
+describe("runPipeline — usage (tokens/custo)", () => {
+  it("repassa result.usage pro logStep quando o agente expõe isso (claude)", async () => {
+    const result = fakeResult("claude", "ok");
+    result.usage = { inputTokens: 2, outputTokens: 4, costUsd: 0.089 };
+    mockedRunClaudeCode.mockResolvedValue(result);
+
+    await runPipeline({ task: "implementar algo" });
+
+    expect(mockedLogStep).toHaveBeenCalledWith("run-1", expect.objectContaining({ usage: result.usage }));
+  });
+
+  it("etapa sem usage (agente que não expõe isso) loga usage: undefined, sem inventar nada", async () => {
+    mockedRunAntigravity.mockResolvedValue(fakeResult("antigravity", "ok"));
+
+    await runPipeline({ task: "pesquisar algo" });
+
+    expect(mockedLogStep).toHaveBeenCalledWith("run-1", expect.objectContaining({ usage: undefined }));
+  });
+});
+
 describe("runPipeline — retry", () => {
   it("loga no histórico as tentativas que falharam antes do sucesso final", async () => {
     const result = fakeResult("claude", "deu certo na terceira");

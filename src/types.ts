@@ -33,6 +33,25 @@ export interface AgentRunOptions {
   onRetry?: (info: AgentRetryAttempt & { maxRetries: number }) => void;
 }
 
+/**
+ * Uso de tokens/custo reportado pelo próprio CLI do agente — nunca
+ * calculado/estimado por nós (ver CLAUDE.md pro probe manual que confirmou
+ * isso). Todos os campos são opcionais porque cada agente expõe um
+ * subconjunto diferente: hoje só `claude` (via `--output-format json`)
+ * expõe `costUsd`; `antigravity` também expõe tokens mas não é usado por
+ * padrão porque isso exigiria abrir mão do streaming real (ver
+ * `agents/antigravity.ts`).
+ */
+export interface AgentUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  thinkingTokens?: number;
+  /** Custo em USD reportado pelo próprio CLI. Ausente quando o agente não expõe isso. */
+  costUsd?: number;
+}
+
 export interface AgentRunResult {
   agent: AgentName;
   prompt: string;
@@ -42,6 +61,8 @@ export interface AgentRunResult {
   durationMs: number;
   /** Tentativas que falharam antes desta ter sucesso — ausente/vazio quando não precisou de retry. */
   retries?: AgentRetryAttempt[];
+  /** Ausente quando o agente não expõe uso de tokens/custo (ver AgentUsage). */
+  usage?: AgentUsage;
 }
 
 export type AgentErrorKind =
@@ -109,6 +130,8 @@ export interface HistoryStep {
   fedByStepId?: number;
   /** Tentativas que falharam antes do resultado final desta etapa (sucesso ou erro definitivo) — ausente/vazio quando não precisou de retry. */
   retries?: AgentRetryAttempt[];
+  /** Ver AgentUsage — ausente quando o agente da etapa não expõe isso, ou quando a etapa terminou em erro. */
+  usage?: AgentUsage;
 }
 
 export interface HistoryRun {
