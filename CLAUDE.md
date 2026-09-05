@@ -172,7 +172,34 @@ orquestrador                             # zero args: abre a tela interativa (In
   detectado por uma heurística de texto no stderr (`looksLikeInvalidArgumentError`
   — "unknown option", "invalid argument", "usage:", etc.) que roda ANTES da
   classificação genérica `nonzero_exit`, senão todo argumento inválido cairia
-  ali e seria retentado à toa. Backoff exponencial simples: `1000 * 2^(tentativa-1)`
+  ali e seria retentado à toa. **Essa heurística é um chute educado, não
+  validado contra o texto real que `claude -p`/`agy -p` produzem pra um
+  argumento inválido de verdade** (nunca fizemos o probe manual — tipo o
+  que existe pro streaming — de forçar esse erro nos dois CLIs e ver a
+  mensagem exata; os padrões vêm de convenção comum de ferramentas
+  estilo getopt/git/npm). Riscos conhecidos, documentados aqui em vez de
+  escondidos:
+  - **Falso positivo**: qualquer stderr que contenha um desses termos por
+    coincidência, mesmo sem ser sobre argumento — o mais preocupante é
+    `"usage:"`, que é curto e genérico o bastante pra aparecer em log de
+    diagnóstico não relacionado (ex.: uma linha de "resource usage:" antes
+    de um crash por falta de memória, que na verdade é um erro transitório
+    e deveria ser retentado). Isso classificaria como `invalid_argument` e
+    pularia o retry indevidamente.
+  - **Falso negativo**: se `claude`/`agy` usarem uma frase diferente pra
+    reportar argumento inválido (formato próprio, mensagem em outro idioma,
+    JSON estruturado em vez de texto livre), a heurística não reconhece e o
+    erro cai no `nonzero_exit` genérico — sendo retentado à toa até 3 vezes
+    antes de falhar (pior caso: ~7s de atraso extra, não perda de dados).
+  - Na prática, o único jeito de `invalid_argument` disparar hoje é um bug
+    nos nossos próprios wrappers (`claudeCode.ts`/`antigravity.ts` passam
+    args fixos, nunca derivados livremente do texto da tarefa) — o texto do
+    usuário vira um único argumento de `execa` (nunca reinterpretado por um
+    shell), então não é um vetor realista de acionar isso. Se algum dia
+    isso mudar (novos args configuráveis pelo usuário), vale então fazer o
+    probe manual real e calibrar a heurística contra os dois CLIs de
+    verdade.
+  Backoff exponencial simples: `1000 * 2^(tentativa-1)`
   ms (1s, 2s, 4s, ...), `maxRetries` (padrão 3, contando só os retries — a
   tentativa inicial não conta) configurável via `AgentRunOptions.maxRetries`
   → `RunPipelineOptions.maxRetries`/`RunManyOptions.maxRetries`. Nunca fazer
@@ -256,16 +283,31 @@ orquestrador                             # zero args: abre a tela interativa (In
       cabeçalho `=== Tarefa i/N ===` por resultado conforme chegam).
       `printResult`/`printError` foram extraídas em `cli.ts` pra serem
       reaproveitadas pelos dois modos.
-- [x] Testes automatizados com Vitest (77 casos):
-  - `src/agents/shared.test.ts` — `runAgentCommand` (retry com backoff):
-    sucesso depois de 1 retry (com o `onRetry` recebendo `attempt`/
-    `maxRetries`/`delayMs` corretos), sequência completa de backoff 1s/2s/4s
-    até o sucesso na 4ª tentativa, esgotamento de `maxRetries` propagando o
-    `AgentError` final já com o array `retries` das tentativas anteriores
-    embutido, comando não encontrado (ENOENT) falhando direto sem retry, e
-    argumento inválido (heurística de stderr) classificado como
-    `invalid_argument` e também falhando direto — usa `vi.useFakeTimers()`/
-    `vi.runAllTimersAsync()` pra não esperar os delays de verdade.
+- [x] Testes automatizados com Vitest (79 casos):
+  - `src/agents/shared.test.ts` (7 testes) — `runAgentCommand` (retry com
+    backoff): sucesso depois de 1 retry (com o `onRetry` recebendo
+    `attempt`/`maxRetries`/`delayMs` corretos), sequência completa de
+    backoff 1s/2s/4s até o sucesso na 4ª tentativa, esgotamento de
+    `maxRetries` propagando o `AgentError` final já com o array `retries`
+    das tentativas anteriores embutido, comando não encontrado (ENOENT)
+    falhando direto sem retry, e argumento inválido (heurística de stderr)
+    classificado como `invalid_argument` e também falhando direto — usa
+    `vi.useFakeTimers()`/`vi.runAllTimersAsync()` pra não esperar os delays
+    de verdade. Mais 2 testes específicos pra confirmar que o backoff de
+    uma chamada não atrasa uma chamada concorrente (a preocupação real por
+    trás disso: `runPipelines()` roda várias tarefas via `Promise.
+    allSettled`, cada uma com seu próprio `runAgentCommand`/retry
+    independente — o `await sleep(delayMs)` do backoff é só um
+    `setTimeout`, não pode travar o event loop nem atrasar as outras): um
+    com `vi.useFakeTimers()` provando a não-bloqueância de forma
+    determinística (avança 0ms com `advanceTimersByTimeAsync` — dreno de
+    microtasks sem avançar o relógio — e confirma que a tarefa sem retry já
+    resolveu enquanto a que está retentando ainda não, já que seu timer de
+    1s não disparou), e outro com timers de verdade (`10_000`ms de timeout
+    de teste, ~1s de duração real) medindo tempo de parede: a tarefa sem
+    retry resolve em menos de 300ms mesmo com a outra presa no backoff de
+    1s, e o tempo total do lote fica perto do delay de uma tarefa sozinha
+    (~1s), não da soma das duas — confirma overlap real, não serialização.
   - `src/orchestrator/router.test.ts` — `planTask` (4 combinações de
     palavra-chave + case insensitivity) e `classifyTaskWithClaude` (3
     classificações possíveis, falha da chamada, resposta inesperada), tudo

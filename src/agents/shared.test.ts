@@ -126,4 +126,86 @@ describe("runAgentCommand — retry com backoff", () => {
     expect(mockedExeca).toHaveBeenCalledTimes(1);
     expect(onRetry).not.toHaveBeenCalled();
   });
+
+  // Duas chamadas concorrentes, como acontece dentro de runPipelines()
+  // (Promise.allSettled) pra duas tarefas de um lote via ";" na TUI. O que
+  // está em jogo: o `await sleep(delayMs)` do backoff é um setTimeout — não
+  // deveria travar o event loop nem atrasar em nada uma OUTRA chamada que
+  // não precisa de retry e já tem tudo que precisa pra resolver.
+  it("[timers falsos] o backoff de retry de uma chamada não bloqueia a resolução de uma chamada concorrente", async () => {
+    mockedExeca
+      .mockReturnValueOnce(asExecaResult(failNonZero())) // tarefa A, 1ª tentativa: falha
+      .mockReturnValueOnce(asExecaResult(ok("tarefa B ok"))) // tarefa B: sucesso de cara
+      .mockReturnValueOnce(asExecaResult(ok("tarefa A ok na 2ª tentativa")));
+
+    vi.useFakeTimers();
+    let taskAResolved = false;
+    let taskBResolved = false;
+
+    const taskA = runAgentCommand({ agent: "claude", command: "claude", args: [], prompt: "A" }).then((r) => {
+      taskAResolved = true;
+      return r;
+    });
+    const taskB = runAgentCommand({ agent: "antigravity", command: "agy", args: [], prompt: "B" }).then((r) => {
+      taskBResolved = true;
+      return r;
+    });
+
+    // Avança 0ms de tempo falso, mas drena os microtasks pendentes no
+    // caminho (é o que `advanceTimersByTimeAsync` faz, diferente da versão
+    // síncrona) — dá tempo da tarefa A cair no catch e AGENDAR seu
+    // setTimeout de 1000ms, e da tarefa B terminar de verdade, sem avançar
+    // o relógio até o ponto em que o timer de A dispararia.
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(taskBResolved).toBe(true);
+    expect(taskAResolved).toBe(false); // ainda esperando o backoff de 1s, sem travar B
+
+    await vi.runAllTimersAsync();
+    await taskA;
+
+    expect(taskAResolved).toBe(true);
+  });
+
+  // Mesma garantia, mas com o relógio de verdade (sem useFakeTimers) — prova
+  // que a conclusão não-bloqueante acontece também sob o agendador real do
+  // Node, não só sob a simulação de timers do Vitest.
+  it(
+    "[timers reais] o backoff de retry de uma chamada não atrasa o tempo de parede de uma chamada concorrente",
+    async () => {
+      mockedExeca
+        .mockReturnValueOnce(asExecaResult(failNonZero())) // A: 1ª tentativa falha
+        .mockReturnValueOnce(asExecaResult(ok("B ok"))) // B: sucesso de cara
+        .mockReturnValueOnce(asExecaResult(ok("A ok na 2ª tentativa")));
+
+      const start = Date.now();
+      let bElapsedMs = -1;
+
+      const taskA = runAgentCommand({ agent: "claude", command: "claude", args: [], prompt: "A", maxRetries: 1 });
+      const taskB = runAgentCommand({
+        agent: "antigravity",
+        command: "agy",
+        args: [],
+        prompt: "B",
+        maxRetries: 1,
+      }).then((r) => {
+        bElapsedMs = Date.now() - start;
+        return r;
+      });
+
+      const [resultA, resultB] = await Promise.all([taskA, taskB]);
+      const totalElapsedMs = Date.now() - start;
+
+      expect(resultA.output).toBe("A ok na 2ª tentativa");
+      expect(resultB.output).toBe("B ok");
+      // B não precisou de retry — se o backoff de A bloqueasse o event loop,
+      // B levaria pelo menos os ~1000ms de A pra resolver. Margem generosa
+      // (300ms) só pra não ficar flaky em CI, bem abaixo do delay de A.
+      expect(bElapsedMs).toBeLessThan(300);
+      // O tempo total fica perto do delay de A sozinho (~1000ms), não da
+      // soma de A + B — confirma overlap real, não serialização.
+      expect(totalElapsedMs).toBeLessThan(1400);
+    },
+    10_000,
+  );
 });

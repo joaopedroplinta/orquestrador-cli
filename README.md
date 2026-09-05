@@ -357,9 +357,17 @@ tentativas que falharam tanto no sucesso final quanto no erro esgotado,
 `execa`, sem chamar `claude`/`agy` de verdade): sucesso depois de 1 retry,
 a sequência completa de backoff exponencial (1s, 2s, 4s) até o sucesso na
 4ª tentativa, esgotamento de `maxRetries` propagando o erro final já com
-o histórico de tentativas embutido, e os dois casos de erro não-elegível
+o histórico de tentativas embutido, os dois casos de erro não-elegível
 pra retry (comando não encontrado / argumento inválido) falhando direto
-na primeira tentativa.
+na primeira tentativa, e — a preocupação real por trás de rodar retries
+dentro de um lote paralelo (`;` na TUI ou `run "<t1>" "<t2>"`) — dois
+testes confirmando que o backoff de uma chamada não atrasa uma chamada
+concorrente: um com timers falsos provando isso de forma determinística
+(a chamada sem retry já resolveu antes do timer de 1s da outra sequer
+disparar), e outro com timers de verdade medindo tempo de parede (a
+chamada sem retry resolve em bem menos de 1s mesmo com a outra presa no
+backoff, e o tempo total do par fica perto do delay de uma tarefa sozinha,
+não da soma das duas).
 
 `src/tui/commands.ts` (o parsing de slash command, o parsing de `;` pra
 múltiplas tarefas, e o estado de modo da TUI) também tem testes — é
@@ -414,6 +422,18 @@ histórico completo.
   backoff (1s/2s/4s, dobrando a cada tentativa) não são configuráveis via
   flag do CLI ainda — só por quem chama `runPipeline`/`runPipelines`
   programaticamente.
+- A heurística que separa "argumento inválido" (não retenta) de "exit code
+  momentâneo" (retenta) é baseada em palavras comuns no stderr ("unknown
+  option", "usage:", etc.) — **nunca foi validada contra a mensagem real**
+  que `claude -p`/`agy -p` produzem pra um argumento inválido de verdade.
+  Pode ter falso positivo (um log de diagnóstico não relacionado que
+  contenha uma dessas palavras, ex. "usage:" numa mensagem sobre uso de
+  memória, cancelando um retry que deveria ter acontecido) ou falso
+  negativo (uma mensagem de erro num formato que a heurística não
+  reconhece, cai em `nonzero_exit` genérico e é retentada à toa — pior
+  caso, ~7s de atraso extra, não perda de dados). Na prática baixo risco
+  hoje: os argumentos passados pros dois CLIs são fixos nos wrappers, o
+  texto da tarefa nunca é reinterpretado como flag.
 - Paralelismo é só entre tarefas top-level independentes (várias tarefas
   na mesma chamada de `run`); dentro de uma tarefa que gera handoff
   (pesquisa → implementação), a execução continua sequencial por design —
