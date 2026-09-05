@@ -20,7 +20,15 @@ function isRoutingStrategy(value: string): value is RoutingStrategy {
   return value === "keyword" || value === "classify";
 }
 
-if (process.argv.slice(2).length === 0) {
+// A TUI (zero subcomando) aceita a flag --no-mascot direto, sem passar pelo
+// commander — abrir a TUI não é um "comando" registrado nele, é o
+// comportamento de fallback quando não há nenhum. `argv` só pode conter
+// essa flag (ou nada) pra ainda contar como "abrir a TUI".
+const argv = process.argv.slice(2);
+const NO_MASCOT_FLAG = "--no-mascot";
+const isTuiInvocation = argv.length === 0 || (argv.length === 1 && argv[0] === NO_MASCOT_FLAG);
+
+if (isTuiInvocation) {
   if (!process.stdin.isTTY) {
     console.error(
       chalk.red(
@@ -31,7 +39,7 @@ if (process.argv.slice(2).length === 0) {
     process.exit(1);
   }
   const { startTui } = await import("./tui/startTui.js");
-  await startTui();
+  await startTui({ mascotEnabled: !argv.includes(NO_MASCOT_FLAG) });
   process.exit(0);
 }
 

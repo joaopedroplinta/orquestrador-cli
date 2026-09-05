@@ -63,11 +63,13 @@ Dentro da tela:
   modo CLI: troca a estratégia de roteamento inteira pras próximas tarefas.
   `classify` classifica toda tarefa via `claude`, mesmo uma com
   palavra-chave óbvia, pulando a tabela de palavra-chave inteiramente.
+- `/mascot` — liga/desliga o mascote (pinguim ASCII). Ver "Mascote" abaixo.
 - Um comando começando com `/` que não é nenhum desses (`/foo`) mostra uma
   mensagem de erro amigável — não trava a tela nem vira uma tarefa.
 - O modo atual (`agente: automático` ou `agente: claude (forçado)`,
-  `roteamento: keyword`/`classify`, e `auto: ligado`/`desligado`) fica
-  sempre visível logo abaixo do transcript.
+  `roteamento: keyword`/`classify`, `auto: ligado`/`desligado`, e
+  `mascote: ligado`/`desligado`) fica sempre visível logo abaixo do
+  transcript.
 - Cada tarefa mostra logo abaixo qual agente foi roteado (`→ antigravity`
   ou `→ antigravity → claude`), e o spinner conta os segundos decorridos
   enquanto roda. Antigravity e Claude Code aparecem em cores diferentes e
@@ -82,6 +84,39 @@ Dentro da tela:
   tarefa em duas partes (pesquisa → implementação) vira uma entrada do
   transcript assim que aquela etapa específica termina, sem esperar a
   outra.
+
+**Mascote:** um pinguim ASCII aparece no banner de boas-vindas, substitui o
+spinner padrão por uma pequena animação "pensando" enquanto uma tarefa
+roda, e reage no final — carinha feliz `(^ ^)` no sucesso, confusa `(? ?)`
+no erro, neutra `(- -)` no cancelamento. Assim fica:
+
+```
+   ___
+  /o o\
+ (  >  )
+  \___/
+  d   b
+⚡ orquestrador
+Orquestra Claude Code + Antigravity numa mesma tarefa.
+Digite uma tarefa e aperte Enter. Separe por ; pra rodar várias em paralelo.
+/history · /agent claude|antigravity|auto · /auto · /routing keyword|classify · /mascot · /exit · Ctrl+C
+
+agente: automático   roteamento: keyword   auto: desligado   mascote: ligado
+
+(o o).. Rodando: pesquisar a última versão do Node.js (2s)
+
+(^ ^) [antigravity] (2841ms)
+A versão mais recente do Node.js é a 24.x...
+```
+
+Desligue com `orquestrador --no-mascot` (só funciona sem nenhuma outra
+flag/subcomando — é específico do modo interativo) ou alterne a qualquer
+momento dentro da tela com `/mascot`. A arte é só ASCII puro, bem estreita
+(a linha mais larga tem 8 caracteres), então não deve quebrar nem em
+terminais bem estreitos. **Não tem uma carinha por tarefa no modo em lote
+(`;`)** — o mascote aparece só no spinner/reação de tarefa única e no
+resumo "Rodando N tarefas em paralelo", pra não virar N pinguins piscando
+ao mesmo tempo.
 
 **Múltiplas tarefas em paralelo, na mesma linha:** separe as tarefas por
 `;` e aperte Enter uma vez só:
@@ -421,7 +456,11 @@ com exit code 1, sem gerar nada.
   (zero subcomando), importa dinamicamente `src/tui/startTui.tsx` — quem
   só usa `run`/`history`/`export` não paga o custo de carregar Ink/React.
 - **`src/tui/`** — tela interativa em Ink/React (`App.tsx` + `startTui.tsx`
-  + `commands.ts` + `PromptInput.tsx`). Reaproveita `runPipeline()` e
+  + `commands.ts` + `PromptInput.tsx` + `mascot.ts`/`Mascot.tsx`). O
+  mascote segue a mesma separação de `commands.ts`: `mascot.ts` é dado/
+  lógica pura (arte ASCII, seleção de frame por estado — testável),
+  `Mascot.tsx` são os componentes Ink que consomem isso (`MascotBanner`,
+  `MascotSpinner`, sem lógica própria pra testar). Reaproveita `runPipeline()` e
   `listRuns()` sem alterar nada neles; tem sua própria versão do prompt de
   ambiguidade (via estado do React, não `readline`) porque Ink assume o
   controle do terminal. O input de texto (`PromptInput.tsx`) também é
@@ -533,11 +572,22 @@ múltiplas tarefas, e o estado de modo da TUI) também tem testes — é
 lógica pura, sem depender de renderizar a tela de verdade: `/agent
 claude|antigravity` forçando o agente, `/agent auto` resetando pro
 roteamento normal, `/auto` alternando o estado, `/routing keyword|classify`
-mudando a estratégia mantendo o resto do estado, os três sendo
-independentes entre si, comando desconhecido/argumento inválido sempre
-virando erro (nunca uma tarefa, nunca uma exceção), 2+ tarefas separadas
-por `;` virando `{ kind: "tasks" }` com os textos aparados, e `;` solto
-ou sobrando no final caindo de volta pro `{ kind: "task" }` original.
+mudando a estratégia mantendo o resto do estado, `/mascot` alternando
+`mascotEnabled`, os quatro sendo independentes entre si, comando
+desconhecido/argumento inválido sempre virando erro (nunca uma tarefa,
+nunca uma exceção), 2+ tarefas separadas por `;` virando `{ kind: "tasks"
+}` com os textos aparados, e `;` solto ou sobrando no final caindo de
+volta pro `{ kind: "task" }` original.
+
+`src/tui/mascot.test.ts` cobre a lógica de seleção de frame do mascote —
+sem testar a arte em si: `mascotThinkingFrame` cicla pelos 4 frames de
+"pensando" na ordem certa e dá a volta (wrap-around) depois do último em
+vez de travar ou retornar `undefined`, `mascotFaceFor` devolve uma
+carinha diferente pra cada estado (sucesso/erro/cancelado, as três
+distintas entre si e do mesmo tamanho da carinha de "pensando", pra
+parecer o mesmo personagem reagindo), e a arte do banner tem altura/
+largura modestas e é só ASCII puro (sem caractere multi-byte que possa
+sair torto em terminal limitado).
 
 `src/tui/App.tsx` (o componente Ink em si) também tem cobertura, via
 [`ink-testing-library`](https://github.com/vadimdemedes/ink-testing-library)
@@ -561,7 +611,13 @@ rota certa cada uma, mesmo com a mesma palavra-chave nas duas; e
 `/routing`: muda a estratégia e reflete na `StatusLine` sem afetar
 `/agent`/`/auto` já setados, argumento inválido mostra erro sem mudar o
 estado, e uma tarefa rodada depois chega em `runPipeline` com a estratégia
-certa de verdade (não só na exibição).
+certa de verdade (não só na exibição); e o mascote: o banner mostra o
+pinguim por padrão e some com `initialMascotEnabled={false}` (equivalente
+ao `--no-mascot`), `/mascot` alterna e reflete na `StatusLine`, o frame de
+"pensando" aparece no lugar do spinner padrão enquanto uma tarefa roda, as
+carinhas de sucesso/erro/cancelamento aparecem junto do resultado
+correspondente, e com o mascote desligado nenhuma carinha aparece em
+lugar nenhum.
 `promptForAgent` (`src/cli.ts`, o fallback
 interativo do modo não-TUI) continua sem teste automatizado — é
 `readline` puro, sem a alternativa de um stdin falso.

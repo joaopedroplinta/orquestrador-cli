@@ -66,6 +66,7 @@ orquestrador history --last              # mostra detalhes da última execução
 orquestrador export <runId>              # relatório em markdown de um run (id completo ou prefixo de 8 chars)
 orquestrador export <runId> -o out.md    # escreve o relatório num arquivo em vez do stdout
 orquestrador                             # zero args: abre a tela interativa (Ink)
+orquestrador --no-mascot                 # idem, mas sem o pinguim ASCII (também dá pra alternar com /mascot dentro da tela)
 ```
 
 ## Convenções
@@ -369,6 +370,57 @@ orquestrador                             # zero args: abre a tela interativa (In
   com `--output`/`-o`, sem confirmação — mesmo padrão Unix de qualquer CLI
   com uma flag de saída explícita (`curl -o`, etc.), sem pedir confirmação
   porque o usuário já nomeou o destino explicitamente via flag.
+- **Mascote (pinguim ASCII) segue a mesma separação pura-lógica/Ink-
+  componente já estabelecida com `commands.ts`/`App.tsx`.** `src/tui/mascot.ts`
+  é 100% dado/lógica pura (arte ASCII, seleção de frame por estado) — sem
+  import de Ink/React, testável direto (`mascot.test.ts`). `src/tui/Mascot.tsx`
+  são os componentes Ink que só consomem esses dados (`MascotBanner`,
+  `MascotSpinner`) — sem lógica própria de seleção, por isso sem teste
+  próprio (visual, não tem "estado" pra verificar além do que já está em
+  `mascot.ts`). Arte só ASCII puro, sem Unicode largo/exótico, de propósito
+  — o pedido foi não quebrar em terminal estreito, e ASCII simples também
+  reduz risco de sair torto em terminais com suporte limitado a caracteres
+  especiais.
+  - Três lugares de uso: banner (`Banner` em `App.tsx`, dentro do `<Static>`
+    — renderiza uma vez só, mesma abordagem do banner de texto já
+    existente), spinner (`MascotSpinner` substitui `<Spinner type="dots" />`
+    do `ink-spinner` quando o mascote está ligado, nos dois pontos onde
+    o dots aparecia — tarefa única e "Rodando N tarefas em paralelo"), e
+    reação (`mascotFaceFor("success"|"error"|"cancelled")`, prependida ao
+    texto das entradas `"result"`/`"error"`/`"cancelled"` do transcript no
+    momento em que são criadas, não num componente separado — evita
+    precisar repassar `mascotEnabled` como prop até `TranscriptEntryView`).
+  - **Deliberadamente sem carinha por tarefa no modo em lote (`;`)** — só o
+    spinner/reação do modo de tarefa única e o resumo agregado
+    "Rodando N tarefas em paralelo" ganham mascote; as caixas ao vivo por
+    tarefa dentro de um lote (`LiveTask`) não. Decisão de escopo consciente
+    (não uma limitação técnica): N pinguins piscando ao mesmo tempo lado a
+    lado seria mais poluição visual que graça, e o pedido original não
+    especificou isso pro modo em lote.
+  - **`MascotSpinner` usa `setInterval` a cada 400ms** (mais lento que o
+    dots padrão do `ink-spinner`, ~80ms, e mais rápido que o contador de
+    segundos, 1000ms) — mesma categoria de atualização periódica que já
+    existia antes (não introduz um padrão de risco novo pro bug de EIO,
+    bug #3), mas validado de novo com PTY real mesmo assim, por rigor:
+    tarefa real rodando com o mascote ligado, banner mostrando o pinguim,
+    animação "pensando" aparecendo e ciclando por alguns segundos sob
+    `incrementalRendering: true`, carinha feliz aparecendo no resultado —
+    sem nenhum `EIO`/`uncaughtException` no log da sessão.
+  - `ModeState.mascotEnabled` (`commands.ts`) segue o mesmo padrão de
+    `forcedAgent`/`autoMode`/`routing`: campo independente, `/mascot`
+    alterna (`toggle-mascot`, mesmo formato de `toggle-auto`), e
+    `INITIAL_MODE_STATE.mascotEnabled` é sobrescrito pelo valor inicial que
+    vem de fora (`App({ initialMascotEnabled })`) em vez de ser sempre
+    `true` — é assim que a flag `--no-mascot` do CLI chega até o estado
+    da TUI, sem precisar duplicar a lógica de toggle em dois lugares.
+  - **`--no-mascot` é tratado ANTES do `commander` processar `argv`** — a
+    TUI (zero subcomando) já era um caso especial resolvido por fora do
+    `commander` (`if (argv.length === 0)`); `--no-mascot` só amplia essa
+    checagem pra aceitar também `argv` com só essa flag e nada mais
+    (`isTuiInvocation`). Não virou uma opção `commander` de verdade porque
+    abrir a TUI não é um "comando" registrado nele, é o comportamento de
+    fallback quando não há nenhum — registrar a flag lá exigiria também
+    registrar um comando fantasma só pra ela existir.
 - **A partir de agora, trabalho por branch + PR, nunca commit direto na
   `main`.** Toda mudança nova nasce numa branch (`feature/...`), e ao
   terminar abro PR via `gh pr create` pra revisão.
@@ -481,7 +533,16 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
       cabeçalho `=== Tarefa i/N ===` por resultado conforme chegam).
       `printResult`/`printError` foram extraídas em `cli.ts` pra serem
       reaproveitadas pelos dois modos.
-- [x] Testes automatizados com Vitest (128 casos):
+- [x] Testes automatizados com Vitest (146 casos):
+  - `src/tui/mascot.test.ts` (8 testes) — `mascotThinkingFrame` cicla pelos
+    4 frames na ordem certa e dá a volta (wrap-around) depois do último em
+    vez de `undefined`/travar (inclusive depois de várias voltas
+    completas); `mascotFaceFor` devolve uma carinha diferente pra cada
+    estado (sucesso/erro/cancelado), as três distintas entre si, e do
+    mesmo tamanho da carinha de "pensando" (mesmo personagem reagindo,
+    não um desenho diferente); e a arte do banner tem altura/largura
+    modestas (≤8 linhas, ≤20 colunas por linha) e é só ASCII puro
+    (regex `^[\x00-\x7F]*$`), sem depender de renderizar nada.
   - `src/reporting.test.ts` — `buildMarkdownReport` com `HistoryRun`
     mockado (sem SQLite de verdade): título/metadados/contagem de etapas,
     heading de etapa com duração formatada e "alimentada pela etapa #N"
@@ -600,14 +661,16 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
     logando `usage: undefined` explicitamente, sem inventar nada.
   - `src/tui/commands.test.ts` — `parseInput` (task vs. cada slash command,
     case insensitivity, `/agent`/`/routing` com argumento inválido/ausente
-    virando erro, comando desconhecido vira erro, `;`-separado com 2+
+    virando erro, `/mascot` virando `toggle-mascot` (sem argumento, é só um
+    liga/desliga), comando desconhecido vira erro, `;`-separado com 2+
     partes não-vazias virando `{ kind: "tasks" }`, e `;` solto/sobrando no
     final caindo de volta pro `{ kind: "task" }` original) e
     `applyModeCommand` (`/agent` mudando `forcedAgent`, `/agent auto`
     resetando pra `null` mantendo o resto do estado, `/auto` alternando
     `autoMode` duas vezes, `/routing classify` mudando a estratégia mantendo
-    o resto do estado, comandos que não mexem no modo deixando o estado
-    intacto, e os três campos sendo independentes entre si).
+    o resto do estado, `/mascot` alternando `mascotEnabled`, comandos que
+    não mexem no modo deixando o estado intacto, e os quatro campos sendo
+    independentes entre si).
   - `src/tui/App.test.tsx` — renderiza `<App />` de verdade via
     `ink-testing-library` (stdin/stdout falso), mockando `runPipeline` e
     `listRuns`. Cobre: banner aparecendo uma única vez, fluxo completo de
@@ -641,7 +704,16 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
     `forcedAgent`/`autoMode` já setados, argumento inválido mostra erro
     amigável sem alterar o estado (continua em "keyword"), e uma tarefa
     rodada depois de `/routing classify` chega em `runPipeline` com
-    `routing: "classify"` de verdade (não só na exibição).
+    `routing: "classify"` de verdade (não só na exibição); mais 7 testes
+    de mascote: banner mostra o pinguim por padrão, `initialMascotEnabled={false}`
+    (equivalente ao `--no-mascot`) tira o pinguim do banner e mostra
+    "mascote: desligado" na `StatusLine`, `/mascot` alterna e reflete na
+    `StatusLine`, o frame de "pensando" (`(o o)`) aparece no lugar do
+    spinner padrão logo que uma tarefa começa a rodar, tarefa bem-sucedida
+    mostra a carinha feliz (`(^ ^)`) junto do resultado, tarefa com erro
+    mostra a carinha confusa (`(? ?)`) junto da mensagem, cancelamento
+    mostra a carinha neutra (`(- -)`), e com o mascote desligado nenhuma
+    carinha aparece em lugar nenhum (nem a de pensando, nem a de reação).
 - [x] Tela interativa (`src/tui/App.tsx` + `src/tui/startTui.tsx`, Ink/React):
       `orquestrador` sem argumentos abre um transcript rolável tipo chat —
       digita tarefa, roda via `runPipeline()`, mostra spinner e resultado;
@@ -789,6 +861,17 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
       mostra tokens/custo por etapa e um resumo de custo total do run
       (marcado como parcial quando nem toda etapa reportou). Nunca
       inventamos um custo pro antigravity — só tokens, quando existirem.
+- [x] Mascote (pinguim ASCII) na TUI (`src/tui/mascot.ts` + `Mascot.tsx`).
+      Aparece no banner de boas-vindas (uma vez, dentro do `<Static>`),
+      substitui o spinner padrão por uma animação "pensando" (`(o o)` →
+      `(o o).` → `(o o)..` → `(o o)...`, ciclando a cada 400ms) enquanto
+      uma tarefa roda, e reage no resultado: `(^ ^)` sucesso, `(? ?)` erro,
+      `(- -)` cancelamento — mesma "família" visual (largura idêntica,
+      só o par do meio muda). Liga por padrão; `orquestrador --no-mascot`
+      desliga na abertura, `/mascot` alterna a qualquer momento dentro da
+      tela. Sem carinha por tarefa no modo em lote (`;`) — decisão de
+      escopo, ver Convenções. Arte só ASCII puro (sem Unicode largo), de
+      propósito, pra não quebrar em terminal estreito.
 
 Testado manualmente (chamando `agy`/`claude` reais do PATH, histórico de
 teste sempre limpo depois):
@@ -930,6 +1013,18 @@ teste sempre limpo depois):
   tinha `retries`, mas não `usage`), e `history --last` leu os dados
   antigos normalmente, com `PRAGMA table_info(steps)` confirmando a coluna
   `usage` adicionada em cima do banco existente sem apagar nada.
+- Mascote, com PTY real (`pexpect`) e uma tarefa real (`agy`): banner
+  mostrou o pinguim (`/o o\`) já no primeiro frame; depois de submeter a
+  tarefa, o frame `(o o)` apareceu na primeira tentativa de Enter e a
+  animação ciclou por alguns segundos sob carga real de streaming, sem
+  nenhum `EIO`/`uncaughtException` no log da sessão; a carinha feliz
+  `(^ ^)` apareceu junto do resultado ao terminar. Testado também
+  `--no-mascot` (pinguim realmente ausente do banner, `StatusLine` já
+  nasce em "mascote: desligado") e `/mascot` religando em runtime
+  (confirmado com o padrão de retry de Enter já estabelecido neste
+  projeto pra PTY — a primeira tentativa sem retry pareceu falhar, mas
+  era só a flakiness de timing do pexpect já documentada aqui, não um bug:
+  com retry, `/mascot` funcionou na primeira tentativa de verdade).
 
 Quatro bugs reais encontrados e corrigidos durante o desenvolvimento:
 
@@ -1051,5 +1146,18 @@ Quatro bugs reais encontrados e corrigidos durante o desenvolvimento:
   visão agregada de custo total gasto ao longo do tempo (soma de todos os
   runs do histórico). Precisaria de uma nova consulta em
   `storage/history.ts` percorrendo todos os `runs`/`steps`.
+- `--no-mascot` só funciona quando é a ÚNICA coisa em `argv` (junto de zero
+  subcomando) — `orquestrador --no-mascot --alguma-outra-flag` não abriria
+  a TUI (cairia no comportamento padrão do `commander`, que não reconhece
+  nenhuma dessas flags soltas). Não é uma limitação real hoje porque não
+  existe nenhuma outra flag pra combinar na abertura da TUI, mas se um dia
+  aparecer uma segunda, `isTuiInvocation` em `cli.ts` precisa virar uma
+  checagem de "é um subconjunto de flags conhecidas da TUI", não mais uma
+  comparação de array de tamanho 1.
+- Mascote: a arte é fixa (um só "personagem", sem opção de trocar
+  cor/skin/expressões) — não foi pedido, e adicionar isso agora seria
+  configuração especulativa sem uso real. Sem carinha por tarefa no modo
+  em lote (`;`) — decisão de escopo consciente, ver Convenções, não uma
+  limitação técnica.
 - Sem interface gráfica além da TUI de terminal, sem multi-tenant (fora de
   escopo do MVP).

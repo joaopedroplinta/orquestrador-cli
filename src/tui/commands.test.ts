@@ -59,6 +59,10 @@ describe("parseInput", () => {
     expect(parseInput("/routing").kind).toBe("error");
   });
 
+  it("/mascot vira toggle-mascot (sem argumento, é só um liga/desliga)", () => {
+    expect(parseInput("/mascot")).toEqual({ kind: "toggle-mascot" });
+  });
+
   it("comando desconhecido retorna erro amigável (nunca vira tarefa nem lança exceção)", () => {
     const result = parseInput("/foo");
     expect(result.kind).toBe("error");
@@ -77,13 +81,18 @@ describe("parseInput", () => {
 describe("applyModeCommand", () => {
   it("/agent claude força o agente no estado", () => {
     const next = applyModeCommand(INITIAL_MODE_STATE, { kind: "set-agent", agent: "claude" });
-    expect(next).toEqual({ forcedAgent: "claude", autoMode: false, routing: "keyword" });
+    expect(next).toEqual({ forcedAgent: "claude", autoMode: false, routing: "keyword", mascotEnabled: true });
   });
 
   it("/agent auto reseta forcedAgent pra null, mantendo o resto do estado", () => {
-    const forced: import("./commands.js").ModeState = { forcedAgent: "claude", autoMode: true, routing: "keyword" };
+    const forced: import("./commands.js").ModeState = {
+      forcedAgent: "claude",
+      autoMode: true,
+      routing: "keyword",
+      mascotEnabled: true,
+    };
     const next = applyModeCommand(forced, { kind: "set-agent", agent: null });
-    expect(next).toEqual({ forcedAgent: null, autoMode: true, routing: "keyword" });
+    expect(next).toEqual({ forcedAgent: null, autoMode: true, routing: "keyword", mascotEnabled: true });
   });
 
   it("/auto alterna autoMode: desligado -> ligado -> desligado", () => {
@@ -96,7 +105,15 @@ describe("applyModeCommand", () => {
 
   it("/routing classify muda a estratégia, mantendo o resto do estado intacto", () => {
     const next = applyModeCommand(INITIAL_MODE_STATE, { kind: "set-routing", routing: "classify" });
-    expect(next).toEqual({ forcedAgent: null, autoMode: false, routing: "classify" });
+    expect(next).toEqual({ forcedAgent: null, autoMode: false, routing: "classify", mascotEnabled: true });
+  });
+
+  it("/mascot alterna mascotEnabled: ligado -> desligado -> ligado", () => {
+    let state = INITIAL_MODE_STATE;
+    state = applyModeCommand(state, { kind: "toggle-mascot" });
+    expect(state.mascotEnabled).toBe(false);
+    state = applyModeCommand(state, { kind: "toggle-mascot" });
+    expect(state.mascotEnabled).toBe(true);
   });
 
   it("comandos que não afetam o modo (exit, history, error, task) deixam o estado inalterado", () => {
@@ -106,10 +123,11 @@ describe("applyModeCommand", () => {
     expect(applyModeCommand(INITIAL_MODE_STATE, { kind: "task", text: "x" })).toEqual(INITIAL_MODE_STATE);
   });
 
-  it("forçar agente, ligar --auto e trocar o roteamento são independentes entre si", () => {
+  it("forçar agente, ligar --auto, trocar o roteamento e desligar o mascote são independentes entre si", () => {
     let state = applyModeCommand(INITIAL_MODE_STATE, { kind: "toggle-auto" });
     state = applyModeCommand(state, { kind: "set-agent", agent: "claude" });
     state = applyModeCommand(state, { kind: "set-routing", routing: "classify" });
-    expect(state).toEqual({ forcedAgent: "claude", autoMode: true, routing: "classify" });
+    state = applyModeCommand(state, { kind: "toggle-mascot" });
+    expect(state).toEqual({ forcedAgent: "claude", autoMode: true, routing: "classify", mascotEnabled: false });
   });
 });
