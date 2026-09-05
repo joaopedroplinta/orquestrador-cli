@@ -6,6 +6,7 @@ import {
   AgentError,
   PipelineCancelledError,
   type AgentName,
+  type AgentRetryAttempt,
   type AgentRunOptions,
   type AgentRunResult,
 } from "../types.js";
@@ -55,6 +56,10 @@ export interface RunPipelineOptions {
   onChunk?: (agent: AgentName, chunk: string) => void;
   /** Chamado assim que uma etapa termina com sucesso, antes das próximas rodarem. */
   onStepComplete?: (result: AgentRunResult) => void;
+  /** Máximo de tentativas de RETRY por etapa em erro transitório (não conta a tentativa inicial) — padrão 3. */
+  maxRetries?: number;
+  /** Chamado antes de cada espera de backoff entre tentativas de uma etapa — pra não parecer que travou. */
+  onRetry?: (agent: AgentName, info: AgentRetryAttempt & { maxRetries: number }) => void;
 }
 
 export interface PipelineResult {
@@ -110,6 +115,8 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         // vale a pena: simulamos a revelação progressiva logo abaixo em vez
         // de fingir que aquele chunk único é "streaming".
         onChunk: streamsIncrementally && options.onChunk ? (chunk) => options.onChunk!(taskStep.agent, chunk) : undefined,
+        maxRetries: options.maxRetries,
+        onRetry: options.onRetry ? (info) => options.onRetry!(taskStep.agent, info) : undefined,
       });
 
       if (!streamsIncrementally && options.onChunk) {
@@ -127,6 +134,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         finishedAt: result.finishedAt,
         durationMs: result.durationMs,
         fedByStepId: previousStepId,
+        retries: result.retries,
       });
       previousOutput = result.output;
     }
@@ -142,6 +150,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         durationMs: 0,
         error: `${error.kind}: ${error.message}`,
         fedByStepId: previousStepId,
+        retries: error.retries.length > 0 ? error.retries : undefined,
       });
     }
     finishRun(runId);
@@ -160,6 +169,8 @@ export interface RunManyOptions {
   onTaskStepStart?: (taskIndex: number, agent: AgentName) => void;
   onTaskChunk?: (taskIndex: number, agent: AgentName, chunk: string) => void;
   onTaskStepComplete?: (taskIndex: number, result: AgentRunResult) => void;
+  maxRetries?: number;
+  onTaskRetry?: (taskIndex: number, agent: AgentName, info: AgentRetryAttempt & { maxRetries: number }) => void;
 }
 
 export interface RunManyResult {
@@ -178,9 +189,11 @@ export async function runPipelines(options: RunManyOptions): Promise<RunManyResu
         task,
         forceAgent: options.forceAgent,
         auto: options.auto,
+        maxRetries: options.maxRetries,
         onStepStart: options.onTaskStepStart ? (agent) => options.onTaskStepStart!(index, agent) : undefined,
         onChunk: options.onTaskChunk ? (agent, chunk) => options.onTaskChunk!(index, agent, chunk) : undefined,
         onStepComplete: options.onTaskStepComplete ? (result) => options.onTaskStepComplete!(index, result) : undefined,
+        onRetry: options.onTaskRetry ? (agent, info) => options.onTaskRetry!(index, agent, info) : undefined,
       }),
     ),
   );

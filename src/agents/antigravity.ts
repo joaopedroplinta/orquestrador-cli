@@ -11,5 +11,7 @@ export async function runAntigravity(options: AgentRunOptions): Promise<AgentRun
     prompt,
     timeoutMs: options.timeoutMs,
     onChunk: options.onChunk,
+    maxRetries: options.maxRetries,
+    onRetry: options.onRetry,
   });
 }

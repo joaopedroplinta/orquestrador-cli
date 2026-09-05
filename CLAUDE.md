@@ -160,6 +160,81 @@ orquestrador                             # zero args: abre a tela interativa (In
   `simulateStreamingReveal()` em `pipeline.ts`, claramente separada e
   comentada como fallback visual — nunca colocar essa lógica dentro do
   wrapper do agente nem fingir que é dado real.
+- **Retry automático com backoff mora em `runAgentCommand` (`src/agents/
+  shared.ts`), não em `pipeline.ts`.** É o lugar que já classifica o erro
+  em `AgentError`/`AgentErrorKind`, então é ali que sabe se aquele erro
+  específico vale a pena repetir. `RETRYABLE_AGENT_ERROR_KINDS` (`types.ts`)
+  é a lista central de quais `AgentErrorKind` são elegíveis — hoje:
+  `timeout`, `auth_expired`, `nonzero_exit`, `unknown`. **Não** são
+  elegíveis: `command_not_found` (o binário não vai aparecer no PATH numa
+  segunda tentativa) e `invalid_argument` (um argumento inválido vai dar o
+  mesmo erro de novo, é sintaxe errada, não sorte). `invalid_argument` é
+  detectado por uma heurística de texto no stderr (`looksLikeInvalidArgumentError`
+  — "unknown option", "invalid argument", "usage:", etc.) que roda ANTES da
+  classificação genérica `nonzero_exit`, senão todo argumento inválido cairia
+  ali e seria retentado à toa. **Essa heurística é um chute educado, não
+  validado contra o texto real que `claude -p`/`agy -p` produzem pra um
+  argumento inválido de verdade** (nunca fizemos o probe manual — tipo o
+  que existe pro streaming — de forçar esse erro nos dois CLIs e ver a
+  mensagem exata; os padrões vêm de convenção comum de ferramentas
+  estilo getopt/git/npm). Riscos conhecidos, documentados aqui em vez de
+  escondidos:
+  - **Falso positivo**: qualquer stderr que contenha um desses termos por
+    coincidência, mesmo sem ser sobre argumento — o mais preocupante é
+    `"usage:"`, que é curto e genérico o bastante pra aparecer em log de
+    diagnóstico não relacionado (ex.: uma linha de "resource usage:" antes
+    de um crash por falta de memória, que na verdade é um erro transitório
+    e deveria ser retentado). Isso classificaria como `invalid_argument` e
+    pularia o retry indevidamente.
+  - **Falso negativo**: se `claude`/`agy` usarem uma frase diferente pra
+    reportar argumento inválido (formato próprio, mensagem em outro idioma,
+    JSON estruturado em vez de texto livre), a heurística não reconhece e o
+    erro cai no `nonzero_exit` genérico — sendo retentado à toa até 3 vezes
+    antes de falhar (pior caso: ~7s de atraso extra, não perda de dados).
+  - Na prática, o único jeito de `invalid_argument` disparar hoje é um bug
+    nos nossos próprios wrappers (`claudeCode.ts`/`antigravity.ts` passam
+    args fixos, nunca derivados livremente do texto da tarefa) — o texto do
+    usuário vira um único argumento de `execa` (nunca reinterpretado por um
+    shell), então não é um vetor realista de acionar isso. Se algum dia
+    isso mudar (novos args configuráveis pelo usuário), vale então fazer o
+    probe manual real e calibrar a heurística contra os dois CLIs de
+    verdade.
+  Backoff exponencial simples: `1000 * 2^(tentativa-1)`
+  ms (1s, 2s, 4s, ...), `maxRetries` (padrão 3, contando só os retries — a
+  tentativa inicial não conta) configurável via `AgentRunOptions.maxRetries`
+  → `RunPipelineOptions.maxRetries`/`RunManyOptions.maxRetries`. Nunca fazer
+  retry de erro de roteamento (`PipelineCancelledError`, ambiguidade) — isso
+  não passa nem perto do `runAgentCommand`, é decidido antes, em `pipeline.ts`.
+- **Cada tentativa que falhou fica registrada, não só a última.** A etapa
+  bem-sucedida (ou o erro final, se esgotar `maxRetries`) carrega um array
+  `retries: AgentRetryAttempt[]` (`{ attempt, kind, message, delayMs,
+  timestamp }`) com uma entrada por tentativa que falhou antes daquele
+  resultado — `AgentRunResult.retries` no caminho de sucesso,
+  `AgentError.retries` no caminho de erro esgotado (o próprio
+  `runAgentCommand` reconstrói o `AgentError` final já com o array
+  completo embutido antes de propagar). `pipeline.ts` repassa isso pro
+  `logStep()` como está, sem transformar. `storage/history.ts` serializa
+  `retries` como JSON numa coluna `retries TEXT` nullable — **sem sistema de
+  migração de verdade no projeto** (ver Pendências), então essa coluna
+  específica foi adicionada com uma migração mínima e guardada
+  (`ensureRetriesColumn`: `PRAGMA table_info` + `ALTER TABLE ... ADD COLUMN`
+  só se a coluna ainda não existir) pra não quebrar/exigir apagar bancos
+  `~/.orquestrador/history.db` já existentes — validado manualmente criando
+  um banco com o schema antigo (sem a coluna) e confirmando que `history
+  --last` lê normal depois de abrir o app uma vez. Visibilidade: `onRetry`
+  é o quarto callback de streaming (`onStepStart`/`onChunk`/`onStepComplete`/
+  `onRetry`) em `RunPipelineOptions`, repassado com o agente já amarrado
+  (`(agent, info) => ...`); em `RunManyOptions` vira `onTaskRetry` com o
+  índice da tarefa também amarrado, mesmo padrão dos outros três. `cli.ts`
+  imprime a tentativa (`⟳ [agente] tentativa X/N falhou (kind): msg —
+  tentando de novo em Yms`) tanto no modo de uma tarefa quanto no paralelo,
+  e `history --last` mostra quantos retries uma etapa passada precisou. A
+  TUI (`App.tsx`) vira uma entrada `kind: "retry"` no transcript (persiste
+  no scrollback, com `batchPrefix` no modo `;`) e limpa o buffer de
+  streaming ao vivo daquela etapa (`setStreamingOutput("")` /
+  `streamingOutput: ""` no `LiveTask`) antes da próxima tentativa começar —
+  senão o output parcial de uma tentativa que falhou ficaria colado no
+  início do resultado da tentativa seguinte.
 - **A partir de agora, trabalho por branch + PR, nunca commit direto na
   `main`.** Toda mudança nova nasce numa branch (`feature/...`), e ao
   terminar abro PR via `gh pr create` pra revisão.
@@ -208,7 +283,31 @@ orquestrador                             # zero args: abre a tela interativa (In
       cabeçalho `=== Tarefa i/N ===` por resultado conforme chegam).
       `printResult`/`printError` foram extraídas em `cli.ts` pra serem
       reaproveitadas pelos dois modos.
-- [x] Testes automatizados com Vitest (67 casos):
+- [x] Testes automatizados com Vitest (79 casos):
+  - `src/agents/shared.test.ts` (7 testes) — `runAgentCommand` (retry com
+    backoff): sucesso depois de 1 retry (com o `onRetry` recebendo
+    `attempt`/`maxRetries`/`delayMs` corretos), sequência completa de
+    backoff 1s/2s/4s até o sucesso na 4ª tentativa, esgotamento de
+    `maxRetries` propagando o `AgentError` final já com o array `retries`
+    das tentativas anteriores embutido, comando não encontrado (ENOENT)
+    falhando direto sem retry, e argumento inválido (heurística de stderr)
+    classificado como `invalid_argument` e também falhando direto — usa
+    `vi.useFakeTimers()`/`vi.runAllTimersAsync()` pra não esperar os delays
+    de verdade. Mais 2 testes específicos pra confirmar que o backoff de
+    uma chamada não atrasa uma chamada concorrente (a preocupação real por
+    trás disso: `runPipelines()` roda várias tarefas via `Promise.
+    allSettled`, cada uma com seu próprio `runAgentCommand`/retry
+    independente — o `await sleep(delayMs)` do backoff é só um
+    `setTimeout`, não pode travar o event loop nem atrasar as outras): um
+    com `vi.useFakeTimers()` provando a não-bloqueância de forma
+    determinística (avança 0ms com `advanceTimersByTimeAsync` — dreno de
+    microtasks sem avançar o relógio — e confirma que a tarefa sem retry já
+    resolveu enquanto a que está retentando ainda não, já que seu timer de
+    1s não disparou), e outro com timers de verdade (`10_000`ms de timeout
+    de teste, ~1s de duração real) medindo tempo de parede: a tarefa sem
+    retry resolve em menos de 300ms mesmo com a outra presa no backoff de
+    1s, e o tempo total do lote fica perto do delay de uma tarefa sozinha
+    (~1s), não da soma das duas — confirma overlap real, não serialização.
   - `src/orchestrator/router.test.ts` — `planTask` (4 combinações de
     palavra-chave + case insensitivity) e `classifyTaskWithClaude` (3
     classificações possíveis, falha da chamada, resposta inesperada), tudo
@@ -235,9 +334,16 @@ orquestrador                             # zero args: abre a tela interativa (In
     real via antigravity, outra simulada via claude) intercalados sem se
     misturar entre si (asserção por reconstrução do texto completo de
     cada tarefa, não por posição exata de chunk — que é detalhe de
-    implementação da simulação); e tarefa ambígua dentro do lote virando
+    implementação da simulação); tarefa ambígua dentro do lote virando
     erro em vez de abrir prompt, mesmo com callbacks de streaming
-    presentes.
+    presentes; e `runPipeline`/`runPipelines` — retry (5 testes, agente
+    mockado — o loop de retry em si já está coberto em `shared.test.ts`,
+    aqui só a integração): `logStep` recebendo o array `retries` da etapa
+    bem-sucedida e do erro final esgotado, `maxRetries`/`onRetry`
+    repassados pro wrapper já com o agente amarrado quando disparado, erro
+    não-elegível (`invalid_argument`) chegando com `retries: undefined`
+    (o wrapper nem chegou a tentar de novo), e `onTaskRetry` do lote
+    chegando com o índice certo da tarefa que precisou retentar.
   - `src/tui/commands.test.ts` — `parseInput` (task vs. cada slash command,
     case insensitivity, `/agent` com argumento inválido/ausente vira erro,
     comando desconhecido vira erro, `;`-separado com 2+ partes não-vazias
@@ -434,6 +540,21 @@ teste sempre limpo depois):
   `Box`/`borderStyle`) pras caixas ao vivo por tarefa não foi necessária
   além da margem de segurança já dada pelo `incrementalRendering`, mas
   manteve o volume de bytes por frame baixo por precaução.
+- Retry automático: `run "pesquisar rapidamente o que é TCP"` de verdade
+  (chamada real ao `agy`, sem forçar erro nenhum) continuou funcionando
+  igual — nenhuma etapa passou pelo caminho de retry (`retries` não
+  aparece em `history --last`), confirmando que a instrumentação nova não
+  muda o caminho feliz. Migração da coluna `retries`: criado manualmente
+  um `~/.orquestrador/history.db` com o schema **anterior** a essa mudança
+  (sem a coluna), depois `history --last` (que aciona `getDb()`) leu os
+  dados antigos normalmente e `PRAGMA table_info(steps)` confirmou a
+  coluna `retries` adicionada em cima do banco existente, sem apagar nem
+  recriar nada — valida que `ensureRetriesColumn` não quebra bancos de
+  antes dessa mudança. O loop de retry em si (sucesso após N tentativas,
+  esgotamento propagando erro, erro não-elegível falhando direto) foi
+  validado via os testes automatizados de `shared.test.ts` (mockando
+  `execa`) — não dá pra forçar `claude -p`/`agy -p` reais a falhar de
+  forma transitória sob demanda pra um teste manual determinístico.
 
 Quatro bugs reais encontrados e corrigidos durante o desenvolvimento:
 
@@ -497,11 +618,17 @@ Quatro bugs reais encontrados e corrigidos durante o desenvolvimento:
 - `planTask` e `classifyTaskWithClaude` avaliam a tarefa inteira; não fazem
   split textual real de uma frase em pedaços — cada etapa recebe o texto
   integral do prompt original, o handoff é só de *output* entre etapas.
-- Sem migração de schema no SQLite (mudanças de schema exigem apagar
-  `~/.orquestrador/history.db` em bancos antigos).
-- Sem testes automatizados pros wrappers de agente (`src/agents/*.ts`) nem
-  pro storage (`src/storage/history.ts`) ainda — só router e pipeline têm
-  cobertura.
+- Sem sistema de migração de schema no SQLite de verdade — mudanças de
+  schema em geral ainda exigem apagar `~/.orquestrador/history.db` em
+  bancos antigos. A coluna `retries` foi a única exceção até agora: ganhou
+  uma migração pontual e guardada (`ensureRetriesColumn` em
+  `storage/history.ts`), não um mecanismo genérico reaproveitável pra
+  futuras colunas.
+- `agents/shared.ts` (`runAgentCommand`, incluindo o loop de retry) tem
+  teste automatizado agora (`shared.test.ts`); os wrappers finos
+  `claudeCode.ts`/`antigravity.ts` (só montam `command`/`args` e chamam
+  `runAgentCommand`) e o storage (`src/storage/history.ts`) continuam sem
+  cobertura própria.
 - `promptForAgent` (`src/cli.ts`) não tem teste automatizado (readline
   interativo é difícil de testar sem TTY real); a lógica de decisão que ele
   alimenta (`resolveAmbiguousAgent` no pipeline) está coberta.

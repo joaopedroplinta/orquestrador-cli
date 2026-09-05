@@ -5,7 +5,7 @@ import ora, { type Ora } from "ora";
 import { createInterface } from "node:readline/promises";
 import { runPipeline, runPipelines, type PipelineResult } from "./orchestrator/pipeline.js";
 import { getLastRun, listRuns } from "./storage/history.js";
-import { AgentError, PipelineCancelledError, type AgentName } from "./types.js";
+import { AgentError, PipelineCancelledError, type AgentName, type AgentRetryAttempt } from "./types.js";
 
 if (process.argv.slice(2).length === 0) {
   if (!process.stdin.isTTY) {
@@ -27,6 +27,14 @@ function printResult(result: PipelineResult): void {
     console.log(chalk.bold(`\n[${step.agent}] (${step.durationMs}ms)`));
     console.log(step.output);
   }
+}
+
+function printRetry(agent: AgentName, info: AgentRetryAttempt & { maxRetries: number }, prefix = ""): void {
+  console.log(
+    chalk.yellow(
+      `${prefix}⟳ [${agent}] tentativa ${info.attempt}/${info.maxRetries} falhou (${info.kind}): ${info.message} — tentando de novo em ${info.delayMs}ms`,
+    ),
+  );
 }
 
 function printError(error: unknown): void {
@@ -103,6 +111,11 @@ program
           task: tarefa,
           forceAgent,
           auto: opts.auto,
+          onRetry: (agent, info) => {
+            spinner.stop();
+            printRetry(agent, info);
+            spinner.start(`Rodando: ${tarefa}`);
+          },
           resolveAmbiguousAgent: async (task) => {
             const chosen = await promptForAgent(task, spinner);
             if (chosen) spinner.start(`Rodando: ${tarefa}`);
@@ -125,7 +138,14 @@ program
     }
 
     console.log(chalk.dim(`Rodando ${tarefas.length} tarefas em paralelo...`));
-    const results = await runPipelines({ tasks: tarefas, forceAgent, auto: opts.auto });
+    const results = await runPipelines({
+      tasks: tarefas,
+      forceAgent,
+      auto: opts.auto,
+      onTaskRetry: (index, agent, info) => {
+        printRetry(agent, info, `[Tarefa ${index + 1}/${tarefas.length}] `);
+      },
+    });
 
     let hadError = false;
     results.forEach(({ task, result, error }, i) => {
@@ -156,8 +176,14 @@ program
       console.log(`Início: ${run.startedAt}${run.finishedAt ? `  Fim: ${run.finishedAt}` : ""}`);
       for (const step of run.steps) {
         const handoff = step.fedByStepId ? chalk.dim(` (alimentada pela etapa #${step.fedByStepId})`) : "";
-        console.log(chalk.bold(`\n[step #${step.id} — ${step.agent}] (${step.durationMs}ms)${handoff}`));
+        const retryTag = step.retries?.length ? chalk.yellow(` (${step.retries.length} retry(s))`) : "";
+        console.log(chalk.bold(`\n[step #${step.id} — ${step.agent}] (${step.durationMs}ms)${handoff}${retryTag}`));
         console.log(chalk.dim(`Prompt: ${step.prompt}`));
+        if (step.retries?.length) {
+          for (const retry of step.retries) {
+            console.log(chalk.dim(`  tentativa ${retry.attempt} falhou (${retry.kind}): ${retry.message}`));
+          }
+        }
         console.log(step.error ? chalk.red(`Erro: ${step.error}`) : step.output);
       }
       return;
