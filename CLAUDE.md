@@ -62,7 +62,9 @@ orquestrador run "<tarefa>" --auto       # classifica via claude se ambígua (ro
 orquestrador run "<tarefa>" --routing=classify  # classifica TODA tarefa via claude, sem tentar keyword antes
 orquestrador run "<tarefa1>" "<tarefa2>" # roda várias tarefas independentes em paralelo
 orquestrador history                     # lista execuções passadas
-orquestrador history --last              # mostra detalhes da última execução
+orquestrador history --last              # mostra detalhes da última execução (com tokens/custo, se houver)
+orquestrador export <runId>              # relatório em markdown de um run (id completo ou prefixo de 8 chars)
+orquestrador export <runId> -o out.md    # escreve o relatório num arquivo em vez do stdout
 orquestrador                             # zero args: abre a tela interativa (Ink)
 ```
 
@@ -309,6 +311,64 @@ orquestrador                             # zero args: abre a tela interativa (In
   literalmente, então um agente novo passa a ser aceito automaticamente
   nessas três validações sem tocar nelas. Ver "Adicionando um novo agente"
   abaixo pro que ainda precisa de edição manual (e por quê).
+- **Uso de tokens/custo (`AgentUsage` em types.ts) só existe pro claude,
+  de propósito — confirmado via probe manual, não suposto** (mesmo
+  princípio do probe de streaming: nunca assumir, sempre medir). Achados:
+  - `claude -p --output-format json` devolve um envelope JSON com o texto
+    de resposta em `.result` e uso REAL (não estimado) em `.usage`/
+    `.total_cost_usd` — inclusive custo em dólar já calculado pelo
+    próprio CLI. Como `claude -p` nunca streama de verdade
+    (`AGENT_REGISTRY.claude.streamsIncrementally === false`), trocar pra
+    `--output-format json` não custa NADA em termos de streaming — não
+    tinha streaming real pra perder.
+  - `agy -p --output-format json` **também** expõe uso de tokens
+    (`usage.input_tokens`/`output_tokens`/etc.), mas isso tem um custo
+    real: um probe cronometrando os chunks de stdout mostrou que o modo
+    json faz o antigravity parar de streamar de verdade — o texto inteiro
+    chega num chunk só, no final (~7.3s de silêncio, depois tudo de uma
+    vez), igual ao modo json do claude. Como o antigravity é o único
+    agente com streaming real hoje (feature já construída, testada e
+    documentada — PR de streaming), a decisão foi **priorizar preservar
+    o streaming em vez de ganhar tracking de uso pro antigravity** —
+    `agents/antigravity.ts` continua em modo texto puro, sem
+    `--output-format json`, e por isso nunca popula `AgentRunResult.usage`.
+    Trade-off documentado, não uma limitação técnica sem solução (ver
+    Pendências pra alternativas não implementadas, tipo `stream-json`).
+  - Também investigado e descartado: `agy --log-file` como canal
+    alternativo pra pegar usage sem mexer no stdout — o log gerado é só
+    ruído de diagnóstico interno (erros de polling de auth, etc.),
+    nenhuma menção a tokens/usage/custo nele.
+  - `runClaudeCode` (`agents/claudeCode.ts`) faz o parsing do envelope
+    JSON isolado ali dentro (`parseClaudeJsonEnvelope`) — `agents/shared.ts`
+    (`runAgentCommand`) continua 100% genérico, sem saber que existe
+    formato JSON nenhum; se o parsing falhar por qualquer motivo (CLI
+    mudou de formato, por exemplo), cai pro texto bruto sem usage em vez
+    de quebrar a etapa inteira — usage é sempre um extra, nunca algo de
+    que o resto do pipeline dependa. `pipeline.ts` só repassa
+    `result.usage` pro `logStep()` como está, mesmo padrão de `retries`.
+    `storage/history.ts` serializa como JSON numa coluna `usage TEXT`
+    nullable, com a mesma migração pontual e guardada
+    (`ensureColumn(db, "usage")`, generalizado a partir do
+    `ensureRetriesColumn` original pra aceitar qualquer nome de coluna).
+  - **Nunca inventamos um custo pro antigravity** — sem preço por token
+    conhecido/confiável, um número calculado por nós seria uma estimativa
+    não confiável, exatamente o que foi pedido pra evitar. `history --last`
+    e o relatório de `export` mostram os tokens do antigravity quando
+    existirem, mas nunca um "custo estimado" pra ele.
+- **`orquestrador export <runId>`** (`src/reporting.ts` +
+  `storage/history.ts`'s `getRunById`) gera um relatório em markdown de
+  uma execução — `buildMarkdownReport(run: HistoryRun): string` é uma
+  função pura (sem I/O), testada com dados mockados
+  (`reporting.test.ts`), sem depender do SQLite de verdade.
+  `getRunById(id)` aceita tanto o UUID completo quanto o prefixo de 8
+  caracteres já mostrado em `history` (mesma convenção de hash curto do
+  git) — tenta bater exato primeiro, senão cai pro prefixo, pegando a
+  execução mais recente em caso de ambiguidade (nunca erro de "múltiplas
+  correspondências", só resolve pra mais recente). `cli.ts` imprime no
+  stdout por padrão (pra dar pra redirecionar/`|`) ou escreve num arquivo
+  com `--output`/`-o`, sem confirmação — mesmo padrão Unix de qualquer CLI
+  com uma flag de saída explícita (`curl -o`, etc.), sem pedir confirmação
+  porque o usuário já nomeou o destino explicitamente via flag.
 - **A partir de agora, trabalho por branch + PR, nunca commit direto na
   `main`.** Toda mudança nova nasce numa branch (`feature/...`), e ao
   terminar abro PR via `gh pr create` pra revisão.
@@ -421,7 +481,26 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
       cabeçalho `=== Tarefa i/N ===` por resultado conforme chegam).
       `printResult`/`printError` foram extraídas em `cli.ts` pra serem
       reaproveitadas pelos dois modos.
-- [x] Testes automatizados com Vitest (111 casos):
+- [x] Testes automatizados com Vitest (128 casos):
+  - `src/reporting.test.ts` — `buildMarkdownReport` com `HistoryRun`
+    mockado (sem SQLite de verdade): título/metadados/contagem de etapas,
+    heading de etapa com duração formatada e "alimentada pela etapa #N"
+    quando há handoff, execução não finalizada mostrando isso
+    explicitamente, etapa com erro mostrando `**Erro:**` em vez de
+    `**Output:**`, tabela markdown de retries com `|` escapado na
+    mensagem (e ausência da seção quando não há retries), usage só com
+    tokens (sem custo, caso antigravity) não gerando linha de custo total,
+    usage com custo (caso claude) aparecendo na etapa E no resumo do run,
+    custo abaixo de 1 centavo usando mais casas decimais pra não
+    arredondar pra US$ 0.00, custo parcial (só algumas etapas) avisando
+    isso explicitamente em vez de fingir que é o total do run, e nenhuma
+    etapa com usage não gerando seção nenhuma de tokens/custo.
+  - `src/agents/claudeCode.test.ts` (5 testes, mockando `execa`) — chama o
+    claude com `--output-format json`, extrai `.result` e o usage completo
+    (tokens + custo real) do envelope, envelope sem usage/custo não quebra
+    (campos undefined em vez de erro), stdout que não é JSON válido cai
+    pro texto bruto sem lançar exceção, e JSON válido mas sem o campo
+    `result` (formato inesperado) também cai pro texto bruto.
   - `src/agents/registry.test.ts` — `AGENT_REGISTRY` tem exatamente as
     entradas claude/antigravity, cada `runner` aponta pra mesma referência
     de função do wrapper de verdade (`toBe`, não só `toEqual`),
@@ -515,7 +594,10 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
     qualquer `routing`, e `runPipelines` repassa `routing` pra cada tarefa
     do lote (as duas classificam de verdade, mesmo a que tem keyword óbvia
     de antigravity — asserção por filtro de conteúdo do prompt, não por
-    ordem de chamada, já que as duas tarefas rodam concorrentemente).
+    ordem de chamada, já que as duas tarefas rodam concorrentemente); e
+    usage (2 testes): `result.usage` repassado pro `logStep` quando o
+    agente expõe isso, e etapa sem usage (agente que não expõe)
+    logando `usage: undefined` explicitamente, sem inventar nada.
   - `src/tui/commands.test.ts` — `parseInput` (task vs. cada slash command,
     case insensitivity, `/agent`/`/routing` com argumento inválido/ausente
     virando erro, comando desconhecido vira erro, `;`-separado com 2+
@@ -694,6 +776,19 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
       fallback neutro (`"white"`) em vez de um ternário de 2 ramos, pra
       degradar sem crash (mas não sem aviso visual) se um agente novo
       esquecer de ganhar cor própria.
+- [x] `orquestrador export <runId>` — relatório em markdown de uma
+      execução do histórico (`src/reporting.ts`, `buildMarkdownReport`),
+      escrito no stdout por padrão ou num arquivo com `-o`/`--output`.
+      `getRunById` (`storage/history.ts`) aceita id completo ou o prefixo
+      de 8 caracteres já mostrado em `history`. Inclui uso de
+      tokens/custo por etapa e o resumo de custo total do run quando
+      disponível (ver bullet de usage acima).
+- [x] Uso de tokens/custo (`AgentUsage`) — só pro claude, por decisão
+      deliberada depois de medir o trade-off real com o streaming do
+      antigravity (ver Convenções pro probe completo). `history --last`
+      mostra tokens/custo por etapa e um resumo de custo total do run
+      (marcado como parcial quando nem toda etapa reportou). Nunca
+      inventamos um custo pro antigravity — só tokens, quando existirem.
 
 Testado manualmente (chamando `agy`/`claude` reais do PATH, histórico de
 teste sempre limpo depois):
@@ -818,6 +913,23 @@ teste sempre limpo depois):
   retry/prefixo escritos antes dessa mudança) continuou passando sem
   nenhuma alteração nos próprios testes de streaming/retry — só o código de
   produção mudou de onde lê essas informações, não o comportamento.
+- Uso de tokens/custo e `export`, de ponta a ponta com chamadas reais:
+  `run "pesquisar... e implementar..."` rodou as duas etapas normalmente;
+  `history --last` mostrou `tokens: entrada 2 · saída 105 · cache leitura
+  16777 · cache criação 47517 · raciocínio 0 · custo US$ 0.19` na etapa do
+  claude, **nenhuma linha de tokens/custo na etapa do antigravity**
+  (confirmando que não inventamos nada pra ele), e `Custo total reportado:
+  US$ 0.19 (1/2 etapas reportaram custo — parcial)` no resumo do run —
+  exatamente o comportamento pretendido. `export <prefixo-de-8-chars>`
+  gerou o markdown completo no stdout; `export <id> -o arquivo.md` salvou
+  no arquivo certo (conteúdo idêntico ao stdout); `export <id-completo>`
+  (UUID inteiro) funcionou igual ao prefixo; `export 00000000` (id
+  inexistente) retornou `Nenhuma execução encontrada...` com exit code 1,
+  sem crash. Migração da coluna `usage`: criado manualmente um
+  `~/.orquestrador/history.db` com o schema anterior a essa mudança (já
+  tinha `retries`, mas não `usage`), e `history --last` leu os dados
+  antigos normalmente, com `PRAGMA table_info(steps)` confirmando a coluna
+  `usage` adicionada em cima do banco existente sem apagar nada.
 
 Quatro bugs reais encontrados e corrigidos durante o desenvolvimento:
 
@@ -883,15 +995,18 @@ Quatro bugs reais encontrados e corrigidos durante o desenvolvimento:
   integral do prompt original, o handoff é só de *output* entre etapas.
 - Sem sistema de migração de schema no SQLite de verdade — mudanças de
   schema em geral ainda exigem apagar `~/.orquestrador/history.db` em
-  bancos antigos. A coluna `retries` foi a única exceção até agora: ganhou
-  uma migração pontual e guardada (`ensureRetriesColumn` em
-  `storage/history.ts`), não um mecanismo genérico reaproveitável pra
-  futuras colunas.
-- `agents/shared.ts` (`runAgentCommand`, incluindo o loop de retry) tem
-  teste automatizado agora (`shared.test.ts`); os wrappers finos
-  `claudeCode.ts`/`antigravity.ts` (só montam `command`/`args` e chamam
-  `runAgentCommand`) e o storage (`src/storage/history.ts`) continuam sem
-  cobertura própria.
+  bancos antigos. `retries` e `usage` foram as exceções até agora: ganharam
+  uma migração pontual e guardada (`ensureColumn(db, nomeDaColuna)` em
+  `storage/history.ts`, generalizada a partir do `ensureRetriesColumn`
+  original), não um mecanismo genérico de verdade tipo versionamento de
+  schema — cada coluna nova ainda precisa de uma chamada extra explícita
+  em `getDb()`.
+- `agents/shared.ts` (`runAgentCommand`, incluindo o loop de retry) e
+  `agents/claudeCode.ts` (parsing do envelope JSON/usage) têm teste
+  automatizado agora; `agents/antigravity.ts` (só monta `command`/`args`) e
+  o storage (`src/storage/history.ts`, incluindo `getRunById` — validado
+  só manualmente, ver "Testado manualmente") continuam sem cobertura
+  própria.
 - `promptForAgent` (`src/cli.ts`) não tem teste automatizado (readline
   interativo é difícil de testar sem TTY real); a lógica de decisão que ele
   alimenta (`resolveAmbiguousAgent` no pipeline) está coberta.
@@ -922,5 +1037,19 @@ Quatro bugs reais encontrados e corrigidos durante o desenvolvimento:
   classify` não avisa que a flag ficou sem efeito (silenciosamente
   ignorada, não é um erro) — só documentado em prosa (README/CLAUDE.md),
   não reforçado na UI.
+- Uso de tokens/custo só é rastreado pro claude, por decisão deliberada
+  (ver Convenções pro probe completo) — antigravity não tem `usage` nunca,
+  pra preservar o streaming real dele. Além disso, a chamada de
+  classificação do `--routing=classify`/`--auto`
+  (`classifyTaskWithClaude`) também usa `runClaudeCode` por baixo, então
+  também consome tokens/custo reais — mas como essa chamada nunca é logada
+  como etapa (não é uma etapa do pipeline, ver Convenções), o usage dela é
+  descartado silenciosamente, nunca aparece em `history --last` nem no
+  `export`. Não é uma quantia gigante (é um prompt curto de classificação),
+  mas é um custo real que hoje não fica visível em lugar nenhum.
+- `history --last`/`export` só mostram custo **por run** — não existe uma
+  visão agregada de custo total gasto ao longo do tempo (soma de todos os
+  runs do histórico). Precisaria de uma nova consulta em
+  `storage/history.ts` percorrendo todos os `runs`/`steps`.
 - Sem interface gráfica além da TUI de terminal, sem multi-tenant (fora de
   escopo do MVP).

@@ -303,6 +303,40 @@ duração, e uma referência de qual etapa alimentou qual:
 orquestrador history --last
 ```
 
+**Tokens e custo, quando disponível:** o Claude Code expõe uso de tokens e
+custo real em dólar (não uma estimativa nossa) via `--output-format json`.
+Cada etapa rodada pelo `claude` mostra uma linha como:
+
+```
+tokens: entrada 2 · saída 105 · cache leitura 16777 · cache criação 47517 · custo US$ 0.19
+```
+
+e o topo do relatório mostra o custo total do run. **O Antigravity não
+mostra custo** — ele também expõe tokens via `--output-format json`, mas
+usar isso trocaria o streaming ao vivo dele (real) por uma resposta única
+no final, então a decisão foi preservar o streaming e não coletar
+tokens/custo dele. Quando nem toda etapa reporta custo, o resumo avisa que
+é parcial (`(1/2 etapas reportaram custo — parcial)`) em vez de fingir que
+é o total do run. Ver "Limitações conhecidas" pro detalhe completo.
+
+### `orquestrador export <runId>`
+
+Gera um **relatório em markdown** de uma execução do histórico — o que
+cada agente fez, prompts, outputs completos, duração de cada etapa,
+tokens/custo (quando disponível) e retries (quando houve):
+
+```bash
+orquestrador export c97f3333                          # imprime no stdout
+orquestrador export c97f3333-a1c5-4099-9906-983b84440a49  # id completo também funciona
+orquestrador export c97f3333 --output relatorio.md     # ou -o, salva num arquivo
+```
+
+`<runId>` aceita o id completo ou só o prefixo de 8 caracteres já mostrado
+em `orquestrador history` (mesma ideia de hash curto do `git`). Se não
+achar uma correspondência exata, tenta por prefixo e usa a execução mais
+recente em caso de mais de uma bater. Um id que não existe retorna erro
+com exit code 1, sem gerar nada.
+
 ## Arquitetura
 
 ```
@@ -367,17 +401,25 @@ orquestrador history --last
   existem" (`AGENT_REGISTRY`, `AGENT_NAMES`, `isAgentName()`) — pipeline,
   router, CLI e TUI leem de lá em vez de hardcodar os nomes; ver
   `CLAUDE.md` ("Adicionando um novo agente") pro passo a passo de estender
-  isso pra um terceiro agente.
+  isso pra um terceiro agente. `agents/claudeCode.ts` chama `claude -p`
+  com `--output-format json` e faz o parsing do envelope pra extrair o
+  texto de resposta e o uso de tokens/custo real — só ele, não o
+  antigravity (ver "Limitações conhecidas" pro porquê).
 - **`src/storage/history.ts`** — persistência em SQLite
   (`~/.orquestrador/history.db`). Cada etapa grava `fed_by_step_id`
   apontando pro id da etapa anterior cujo output virou seu contexto —
   é o que permite reconstruir a cadeia de handoff depois, via
-  `history --last` — e `retries` (JSON com cada tentativa que falhou antes
-  do resultado final daquela etapa).
-- **`src/cli.ts`** — entrypoint (`commander`) com os comandos `run` e
-  `history`, spinner (`ora`) e cores (`chalk`). Sem argumentos (zero
-  subcomando), importa dinamicamente `src/tui/startTui.tsx` — quem só usa
-  `run`/`history` não paga o custo de carregar Ink/React.
+  `history --last` —, `retries` (JSON com cada tentativa que falhou antes
+  do resultado final daquela etapa), e `usage` (JSON com tokens/custo,
+  quando o agente expõe isso). `getRunById(id)` busca uma execução por id
+  completo ou prefixo de 8 caracteres, usado pelo `export`.
+- **`src/reporting.ts`** — `buildMarkdownReport(run)`, função pura que
+  monta o relatório markdown do `export` a partir de um `HistoryRun` — sem
+  I/O nenhum, só formatação, testável com dados mockados.
+- **`src/cli.ts`** — entrypoint (`commander`) com os comandos `run`,
+  `history` e `export`, spinner (`ora`) e cores (`chalk`). Sem argumentos
+  (zero subcomando), importa dinamicamente `src/tui/startTui.tsx` — quem
+  só usa `run`/`history`/`export` não paga o custo de carregar Ink/React.
 - **`src/tui/`** — tela interativa em Ink/React (`App.tsx` + `startTui.tsx`
   + `commands.ts` + `PromptInput.tsx`). Reaproveita `runPipeline()` e
   `listRuns()` sem alterar nada neles; tem sua própria versão do prompt de
@@ -425,7 +467,9 @@ redundante), classificação falhando com `--routing=classify` cai pro
 resolvedor de ambiguidade igual ao fluxo padrão, `forceAgent` (global ou
 prefixo) sempre tem prioridade sobre qualquer `--routing`, e o lote
 (`runPipelines`) repassa a estratégia pra cada tarefa independentemente.
-`runPipelines`
+Uso de tokens/custo: `result.usage` é repassado pro histórico quando o
+agente expõe isso, e uma etapa sem usage loga isso explicitamente como
+ausente em vez de inventar um valor. `runPipelines`
 (mapeamento tarefa → resultado, falha parcial isolada, tarefa ambígua no
 lote virando erro pontual, e uma checagem de que a execução é concorrente de
 verdade — tempo total bem abaixo da soma dos delays individuais), e
@@ -465,6 +509,24 @@ não da soma das duas).
 `streamsIncrementally` reflete o probe manual documentado, `AGENT_NAMES`
 é derivado das chaves do registro (não uma lista hardcoded separada), e
 `isAgentName` reconhece os dois agentes e rejeita nomes desconhecidos.
+
+`src/agents/claudeCode.test.ts` (mockando `execa`) cobre o parsing do
+envelope `--output-format json`: chama o claude com a flag certa, extrai
+o texto de resposta e o usage completo (tokens + custo real em USD) do
+envelope, envelope sem usage/custo não quebra nada (campos ausentes em
+vez de erro), e stdout que não é JSON válido (ou que é JSON mas sem o
+campo `result` esperado) cai pro texto bruto sem lançar exceção.
+
+`src/reporting.test.ts` cobre `buildMarkdownReport` com `HistoryRun`
+mockado, sem nenhum SQLite de verdade envolvido: título/metadados/
+contagem de etapas, formatação de duração, "alimentada pela etapa #N"
+quando há handoff, execução não finalizada mostrando isso explicitamente,
+etapa com erro mostrando o erro em vez do output, tabela de retries (com
+`|` escapado numa mensagem), usage só com tokens não gerando linha de
+custo, usage com custo aparecendo na etapa e no resumo do run, custo
+abaixo de 1 centavo com mais casas decimais pra não virar US$ 0.00, e
+custo parcial (só algumas etapas) avisando isso em vez de fingir que é o
+total do run.
 
 `src/tui/commands.ts` (o parsing de slash command, o parsing de `;` pra
 múltiplas tarefas, e o estado de modo da TUI) também tem testes — é
@@ -540,6 +602,16 @@ histórico completo.
   caso, ~7s de atraso extra, não perda de dados). Na prática baixo risco
   hoje: os argumentos passados pros dois CLIs são fixos nos wrappers, o
   texto da tarefa nunca é reinterpretado como flag.
+- **Tokens/custo só são rastreados pro Claude Code** — o Antigravity
+  também expõe isso via `--output-format json` (confirmado, não é falta de
+  suporte no CLI dele), mas usar essa flag trocaria o streaming real dele
+  por uma resposta única no final; a decisão foi preservar o streaming.
+  Além disso, a chamada de classificação de `--routing=classify`/`--auto`
+  também gasta tokens/custo de verdade (usa o claude por baixo), mas como
+  ela nunca é logada como etapa do pipeline, esse custo não aparece em
+  lugar nenhum — não é uma quantia grande (prompt curto), mas é real.
+  `history --last`/`export` só mostram custo por execução — sem uma visão
+  agregada de custo total ao longo do tempo.
 - `--routing=classify` classifica em só três categorias fixas
   ("pesquisa"/"implementação"/"ambos", mapeadas pra antigravity/claude/os
   dois) — um terceiro agente adicionado ao registro (ver "Arquitetura") não

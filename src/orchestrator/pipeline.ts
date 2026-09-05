@@ -157,6 +157,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         durationMs: result.durationMs,
         fedByStepId: previousStepId,
         retries: result.retries,
+        usage: result.usage,
       });
       previousOutput = result.output;
     }
