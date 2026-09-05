@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Box, Static, Text, useApp } from "ink";
 import Spinner from "ink-spinner";
 import { Fragment, useCallback, useEffect, useState } from "react";
-import { runPipeline } from "../orchestrator/pipeline.js";
+import { runPipeline, runPipelines } from "../orchestrator/pipeline.js";
 import { planTask } from "../orchestrator/router.js";
 import { listRuns } from "../storage/history.js";
 import {
@@ -15,11 +15,17 @@ import {
 import { applyModeCommand, INITIAL_MODE_STATE, parseInput, type ModeState } from "./commands.js";
 import PromptInput from "./PromptInput.js";
 
+/** Tarefas separadas por ";" numa linha só ganham essa marca pra mostrar "Tarefa i/N" no transcript. */
+interface BatchTag {
+  index: number;
+  total: number;
+}
+
 type TranscriptEntry =
   | { kind: "banner"; id: string }
-  | { kind: "task"; id: string; text: string; agents: AgentName[] }
-  | { kind: "result"; id: string; steps: AgentRunResult[] }
-  | { kind: "error"; id: string; message: string }
+  | { kind: "task"; id: string; text: string; agents: AgentName[]; batch?: BatchTag }
+  | { kind: "result"; id: string; steps: AgentRunResult[]; batch?: BatchTag }
+  | { kind: "error"; id: string; message: string; batch?: BatchTag }
   | { kind: "cancelled"; id: string; message: string }
   | { kind: "info"; id: string; text: string };
 
@@ -30,8 +36,33 @@ interface PendingAgentPrompt {
   resolve: (agent: AgentName | null) => void;
 }
 
+/** Estado ao vivo de uma tarefa rodando dentro de um lote (`tarefa1; tarefa2`). */
+interface LiveTask {
+  index: number;
+  total: number;
+  task: string;
+  agent: AgentName | null;
+  streamingOutput: string;
+}
+
 function agentColor(agent: AgentName): string {
   return agent === "claude" ? "magenta" : "blue";
+}
+
+function batchPrefix(batch: BatchTag | undefined): string {
+  return batch ? `Tarefa ${batch.index}/${batch.total} · ` : "";
+}
+
+// Reaproveitado pelo modo de uma tarefa só e pelo modo em lote — sempre a
+// mesma leitura de erro (cancelamento vs. erro de agente vs. genérico).
+function describeError(error: unknown): { kind: "error" | "cancelled"; message: string } {
+  if (error instanceof PipelineCancelledError) {
+    return { kind: "cancelled", message: error.message };
+  }
+  if (error instanceof AgentError) {
+    return { kind: "error", message: `[${error.agent}] ${error.kind}: ${error.message}` };
+  }
+  return { kind: "error", message: error instanceof Error ? error.message : String(error) };
 }
 
 function Banner() {
@@ -41,7 +72,9 @@ function Banner() {
         ⚡ orquestrador
       </Text>
       <Text dimColor>Orquestra Claude Code + Antigravity numa mesma tarefa.</Text>
-      <Text dimColor>Digite uma tarefa e aperte Enter.</Text>
+      <Text dimColor>
+        Digite uma tarefa e aperte Enter. Separe por <Text color="green">;</Text> pra rodar várias em paralelo.
+      </Text>
       <Text dimColor>
         <Text color="green">/history</Text> · <Text color="green">/agent claude|antigravity|auto</Text> ·{" "}
         <Text color="green">/auto</Text> · <Text color="green">/exit</Text> · Ctrl+C
@@ -79,6 +112,7 @@ export default function App() {
   const [mode, setMode] = useState<ModeState>(INITIAL_MODE_STATE);
   const [streamingAgent, setStreamingAgent] = useState<AgentName | null>(null);
   const [streamingOutput, setStreamingOutput] = useState("");
+  const [liveTasks, setLiveTasks] = useState<LiveTask[] | null>(null);
 
   useEffect(() => {
     if (status !== "running") {
@@ -142,26 +176,74 @@ export default function App() {
             }),
         });
       } catch (error) {
-        if (error instanceof PipelineCancelledError) {
-          addEntry({ kind: "cancelled", id: randomUUID(), message: error.message });
-        } else if (error instanceof AgentError) {
-          addEntry({
-            kind: "error",
-            id: randomUUID(),
-            message: `[${error.agent}] ${error.kind}: ${error.message}`,
-          });
+        const described = describeError(error);
+        if (described.kind === "cancelled") {
+          addEntry({ kind: "cancelled", id: randomUUID(), message: described.message });
         } else {
-          addEntry({
-            kind: "error",
-            id: randomUUID(),
-            message: error instanceof Error ? error.message : String(error),
-          });
+          addEntry({ kind: "error", id: randomUUID(), message: described.message });
         }
       } finally {
         setStatus("idle");
         setRunningTask(null);
         setStreamingAgent(null);
         setStreamingOutput("");
+      }
+    },
+    [addEntry, mode],
+  );
+
+  const runTasksInParallel = useCallback(
+    async (texts: string[]) => {
+      const total = texts.length;
+      setStatus("running");
+      setLiveTasks(
+        texts.map((task, i) => ({ index: i + 1, total, task, agent: null, streamingOutput: "" })),
+      );
+
+      for (const [i, task] of texts.entries()) {
+        const agents = mode.forcedAgent ? [mode.forcedAgent] : planTask(task).map((step) => step.agent);
+        addEntry({ kind: "task", id: randomUUID(), text: task, agents, batch: { index: i + 1, total } });
+      }
+
+      try {
+        // Sem resolveAmbiguousAgent aqui, igual ao `run` não-interativo — não dá
+        // pra abrir vários prompts de ambiguidade concorrentes sem confundir
+        // qual pergunta é de qual tarefa. Uma tarefa ambígua no lote simplesmente
+        // vira um resultado de erro só pra ela, sem travar nada.
+        const results = await runPipelines({
+          tasks: texts,
+          forceAgent: mode.forcedAgent ?? undefined,
+          auto: mode.autoMode,
+          onTaskStepStart: (index, agent) => {
+            setLiveTasks((prev) => prev?.map((t, i) => (i === index ? { ...t, agent, streamingOutput: "" } : t)) ?? prev);
+          },
+          onTaskChunk: (index, _agent, chunk) => {
+            setLiveTasks(
+              (prev) => prev?.map((t, i) => (i === index ? { ...t, streamingOutput: t.streamingOutput + chunk } : t)) ?? prev,
+            );
+          },
+          onTaskStepComplete: (index, stepResult) => {
+            addEntry({
+              kind: "result",
+              id: randomUUID(),
+              steps: [stepResult],
+              batch: { index: index + 1, total },
+            });
+          },
+        });
+
+        results.forEach((result, i) => {
+          if (!result.error) return;
+          const described = describeError(result.error);
+          if (described.kind === "cancelled") {
+            addEntry({ kind: "cancelled", id: randomUUID(), message: described.message });
+          } else {
+            addEntry({ kind: "error", id: randomUUID(), message: described.message, batch: { index: i + 1, total } });
+          }
+        });
+      } finally {
+        setStatus("idle");
+        setLiveTasks(null);
       }
     },
     [addEntry, mode],
@@ -233,9 +315,12 @@ export default function App() {
         case "task":
           void runTask(parsed.text);
           return;
+        case "tasks":
+          void runTasksInParallel(parsed.texts);
+          return;
       }
     },
-    [status, pendingAgentPrompt, mode, addEntry, exit, showHistory, runTask],
+    [status, pendingAgentPrompt, mode, addEntry, exit, showHistory, runTask, runTasksInParallel],
   );
 
   return (
@@ -244,7 +329,33 @@ export default function App() {
 
       <StatusLine mode={mode} />
 
-      {status === "running" && (
+      {status === "running" && liveTasks && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text dimColor>
+            <Spinner type="dots" /> Rodando {liveTasks.length} tarefas em paralelo...{" "}
+            <Text dimColor>({elapsedSeconds}s)</Text>
+          </Text>
+          {liveTasks.map((t) => (
+            <Box key={t.index} flexDirection="column" marginTop={1}>
+              <Text dimColor>
+                ┌ Tarefa {t.index}/{t.total}: {t.task}
+              </Text>
+              {t.agent && (
+                <Text>
+                  {"│ "}
+                  <Text bold color={agentColor(t.agent)}>
+                    [{t.agent}]
+                    {!AGENT_STREAMS_INCREMENTALLY[t.agent] && <Text dimColor> (simulando…)</Text>}
+                  </Text>
+                </Text>
+              )}
+              {t.streamingOutput.length > 0 && <Text>{`│ ${t.streamingOutput}`}</Text>}
+            </Box>
+          ))}
+        </Box>
+      )}
+
+      {status === "running" && !liveTasks && (
         <Box flexDirection="column" marginTop={1}>
           <Box>
             <Text color="cyan">
@@ -297,6 +408,7 @@ function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
             <Text color="green" bold>
               ›{" "}
             </Text>
+            {entry.batch && <Text dimColor>{batchPrefix(entry.batch)}</Text>}
             <Text>{entry.text}</Text>
           </Box>
           {entry.agents.length > 0 && (
@@ -318,7 +430,7 @@ function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
           {entry.steps.map((step, i) => (
             <Box key={i} flexDirection="column" marginTop={1}>
               <Text bold color={agentColor(step.agent)}>
-                [{step.agent}] ({step.durationMs}ms)
+                {batchPrefix(entry.batch)}[{step.agent}] ({step.durationMs}ms)
               </Text>
               <Text>{step.output}</Text>
             </Box>
@@ -328,7 +440,10 @@ function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
     case "error":
       return (
         <Box marginTop={1}>
-          <Text color="red">{entry.message}</Text>
+          <Text color="red">
+            {batchPrefix(entry.batch)}
+            {entry.message}
+          </Text>
         </Box>
       );
     case "cancelled":

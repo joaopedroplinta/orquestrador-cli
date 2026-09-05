@@ -156,6 +156,10 @@ export interface RunManyOptions {
   tasks: string[];
   forceAgent?: AgentName;
   auto?: boolean;
+  /** Mesmos callbacks de streaming do runPipeline, mas com o índice (em `tasks`) da tarefa dona do evento. */
+  onTaskStepStart?: (taskIndex: number, agent: AgentName) => void;
+  onTaskChunk?: (taskIndex: number, agent: AgentName, chunk: string) => void;
+  onTaskStepComplete?: (taskIndex: number, result: AgentRunResult) => void;
 }
 
 export interface RunManyResult {
@@ -169,7 +173,16 @@ export interface RunManyResult {
 // Sem resolveAmbiguousAgent aqui: várias tarefas não podem disputar o mesmo prompt interativo.
 export async function runPipelines(options: RunManyOptions): Promise<RunManyResult[]> {
   const settled = await Promise.allSettled(
-    options.tasks.map((task) => runPipeline({ task, forceAgent: options.forceAgent, auto: options.auto })),
+    options.tasks.map((task, index) =>
+      runPipeline({
+        task,
+        forceAgent: options.forceAgent,
+        auto: options.auto,
+        onStepStart: options.onTaskStepStart ? (agent) => options.onTaskStepStart!(index, agent) : undefined,
+        onChunk: options.onTaskChunk ? (agent, chunk) => options.onTaskChunk!(index, agent, chunk) : undefined,
+        onStepComplete: options.onTaskStepComplete ? (result) => options.onTaskStepComplete!(index, result) : undefined,
+      }),
+    ),
   );
 
   return settled.map((outcome, i) => {
