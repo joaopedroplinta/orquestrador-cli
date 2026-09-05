@@ -75,12 +75,14 @@ describe("App (TUI)", () => {
   });
 
   it("roda uma tarefa completa: spinner aparece, depois o resultado, e o input volta a ficar ativo", async () => {
-    let resolvePipeline!: (value: Awaited<ReturnType<typeof runPipeline>>) => void;
-    mockedRunPipeline.mockReturnValue(
-      new Promise((resolve) => {
-        resolvePipeline = resolve;
-      }),
-    );
+    let resolvePipeline!: () => void;
+    let capturedOptions!: RunPipelineOptions;
+    mockedRunPipeline.mockImplementation((options) => {
+      capturedOptions = options;
+      return new Promise((resolve) => {
+        resolvePipeline = () => resolve({ runId: "run-1", task: options.task, steps: [] });
+      });
+    });
 
     const { lastFrame, stdin } = render(<App />);
     await submit(stdin, "pesquisar node");
@@ -88,7 +90,10 @@ describe("App (TUI)", () => {
     expect(lastFrame()).toContain("Rodando: pesquisar node");
     expect(lastFrame()).toContain("→ antigravity");
 
-    resolvePipeline({ runId: "run-1", task: "pesquisar node", steps: [fakeStep("antigravity", "resposta de teste")] });
+    // Simula o que o runPipeline de verdade faz: onStepComplete assim que a
+    // etapa termina, e só depois a promise inteira resolve.
+    capturedOptions.onStepComplete?.(fakeStep("antigravity", "resposta de teste"));
+    resolvePipeline();
     await tick();
     await tick();
 
@@ -101,6 +106,46 @@ describe("App (TUI)", () => {
     expect(lastFrame()).toContain("❯ ok");
   });
 
+  it("mostra o output chegando ao vivo enquanto a etapa roda (antes de terminar)", async () => {
+    let capturedOptions!: RunPipelineOptions;
+    mockedRunPipeline.mockImplementation((options) => {
+      capturedOptions = options;
+      return new Promise(() => {}); // nunca resolve nesse teste -- só nos interessa o "durante"
+    });
+
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "pesquisar node");
+
+    capturedOptions.onStepStart?.("antigravity");
+    capturedOptions.onChunk?.("antigravity", "primeiro pedaço ");
+    await tick();
+    capturedOptions.onChunk?.("antigravity", "segundo pedaço");
+    await tick();
+
+    expect(lastFrame()).toContain("[antigravity]");
+    expect(lastFrame()).toContain("primeiro pedaço segundo pedaço");
+    expect(lastFrame()).not.toContain("(simulando…)"); // antigravity streama de verdade
+  });
+
+  it('marca "(simulando…)" quando o agente não streama de verdade (claude)', async () => {
+    let capturedOptions!: RunPipelineOptions;
+    mockedRunPipeline.mockImplementation((options) => {
+      capturedOptions = options;
+      return new Promise(() => {});
+    });
+
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "implementar algo");
+
+    capturedOptions.onStepStart?.("claude");
+    capturedOptions.onChunk?.("claude", "texto revelado aos poucos");
+    await tick();
+
+    expect(lastFrame()).toContain("[claude]");
+    expect(lastFrame()).toContain("(simulando…)");
+    expect(lastFrame()).toContain("texto revelado aos poucos");
+  });
+
   it("tarefa ambígua abre o prompt de escolha de agente embutido na tela", async () => {
     mockedRunPipeline.mockImplementation(
       (options: RunPipelineOptions) =>
@@ -110,7 +155,9 @@ describe("App (TUI)", () => {
               reject(new PipelineCancelledError("boa tarde"));
               return;
             }
-            resolve({ runId: "run-1", task: "boa tarde", steps: [fakeStep(chosen, "ok")] });
+            const stepResult = fakeStep(chosen, "ok");
+            options.onStepComplete?.(stepResult);
+            resolve({ runId: "run-1", task: "boa tarde", steps: [stepResult] });
           });
         }),
     );

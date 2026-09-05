@@ -9,18 +9,32 @@ export interface RunAgentCommandOptions {
   args: string[];
   prompt: string;
   timeoutMs?: number;
+  /**
+   * Chamado com cada pedaço de stdout assim que o processo escreve, antes
+   * dele terminar. Só reflete streaming de verdade se o CLI subjacente
+   * também escrever de forma incremental — ver `AGENT_STREAMS_INCREMENTALLY`
+   * em `types.ts`. Não afeta o `output` final devolvido (continua vindo do
+   * buffer completo do `execa`, igual antes).
+   */
+  onChunk?: (chunk: string) => void;
 }
 
 export async function runAgentCommand(
   options: RunAgentCommandOptions,
 ): Promise<AgentRunResult> {
-  const { agent, command, args, prompt, timeoutMs = DEFAULT_TIMEOUT_MS } = options;
+  const { agent, command, args, prompt, timeoutMs = DEFAULT_TIMEOUT_MS, onChunk } = options;
   const startedAt = new Date().toISOString();
   const start = Date.now();
 
   let result: Awaited<ReturnType<typeof execa>>;
   try {
-    result = await execa(command, args, { timeout: timeoutMs, reject: false });
+    const subprocess = execa(command, args, { timeout: timeoutMs, reject: false });
+    if (onChunk) {
+      subprocess.stdout?.on("data", (chunk: Buffer | string) => {
+        onChunk(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
+      });
+    }
+    result = await subprocess;
   } catch (cause) {
     if (isEnoent(cause)) {
       throw new AgentError(

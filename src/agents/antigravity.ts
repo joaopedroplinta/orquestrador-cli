@@ -10,5 +10,6 @@ export async function runAntigravity(options: AgentRunOptions): Promise<AgentRun
     args: ["-p", prompt, "--print-timeout", "3m"],
     prompt,
     timeoutMs: options.timeoutMs,
+    onChunk: options.onChunk,
   });
 }

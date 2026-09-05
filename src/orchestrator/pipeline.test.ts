@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentError, PipelineCancelledError, type AgentRunResult } from "../types.js";
 
 vi.mock("../agents/claudeCode.js", () => ({ runClaudeCode: vi.fn() }));
@@ -172,6 +172,76 @@ describe("runPipeline", () => {
     );
 
     expect(resolveAmbiguousAgent).toHaveBeenCalledWith(task);
+  });
+});
+
+describe("runPipeline — streaming", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("onStepStart e onStepComplete disparam pra cada etapa, na ordem certa", async () => {
+    mockedRunAntigravity.mockResolvedValue(fakeResult("antigravity", "resultado da pesquisa"));
+    mockedRunClaudeCode.mockResolvedValue(fakeResult("claude", "implementação feita"));
+
+    const events: string[] = [];
+    const onStepStart = vi.fn((agent: string) => events.push(`start:${agent}`));
+    const onStepComplete = vi.fn((result: AgentRunResult) => events.push(`complete:${result.agent}`));
+
+    const task = "pesquisar a versão do node e implementar um upgrade";
+    await runPipeline({ task, onStepStart, onStepComplete });
+
+    expect(events).toEqual(["start:antigravity", "complete:antigravity", "start:claude", "complete:claude"]);
+  });
+
+  it("repassa chunks reais pro agente que streama de verdade (antigravity), sem passar pela simulação", async () => {
+    mockedRunAntigravity.mockImplementation(async (opts) => {
+      opts.onChunk?.("pedaço 1 ");
+      opts.onChunk?.("pedaço 2");
+      return fakeResult("antigravity", "pedaço 1 pedaço 2");
+    });
+
+    const chunks: Array<[string, string]> = [];
+    const onChunk = vi.fn((agent: string, chunk: string) => chunks.push([agent, chunk]));
+
+    await runPipeline({ task: "pesquisar node", onChunk });
+
+    expect(chunks).toEqual([
+      ["antigravity", "pedaço 1 "],
+      ["antigravity", "pedaço 2"],
+    ]);
+  });
+
+  it("simula a revelação progressiva pro agente que não streama (claude), sem perder nem duplicar texto", async () => {
+    vi.useFakeTimers();
+    const fullText =
+      "Este é um texto de resultado razoavelmente longo pra testar a simulação de streaming em pedaços, sem depender de nenhum chunk real vindo do processo.";
+    mockedRunClaudeCode.mockResolvedValue(fakeResult("claude", fullText));
+
+    const chunks: string[] = [];
+    const onChunk = vi.fn((_agent: string, chunk: string) => chunks.push(chunk));
+
+    const pending = runPipeline({ task: "implementar algo", onChunk });
+    await vi.runAllTimersAsync();
+    await pending;
+
+    expect(chunks.length).toBeGreaterThan(1); // realmente virou vários pedaços, não um só
+    expect(chunks.join("")).toBe(fullText); // nada perdido nem duplicado ao juntar de volta
+    expect(chunks[0]!.length).toBeLessThan(fullText.length); // nunca entrega tudo de uma vez
+  });
+
+  it("onStepComplete de uma etapa bem-sucedida dispara mesmo se a etapa seguinte falhar depois", async () => {
+    mockedRunAntigravity.mockResolvedValue(fakeResult("antigravity", "pesquisa ok"));
+    const error = new AgentError("claude", "timeout", "excedeu o timeout");
+    mockedRunClaudeCode.mockRejectedValue(error);
+
+    const onStepComplete = vi.fn();
+    const task = "pesquisar a versão do node e implementar um upgrade";
+
+    await expect(runPipeline({ task, onStepComplete })).rejects.toBe(error);
+
+    expect(onStepComplete).toHaveBeenCalledTimes(1);
+    expect(onStepComplete).toHaveBeenCalledWith(expect.objectContaining({ agent: "antigravity" }));
   });
 });
 
