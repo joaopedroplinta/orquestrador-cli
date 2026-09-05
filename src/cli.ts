@@ -5,6 +5,7 @@ import ora, { type Ora } from "ora";
 import { writeFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { isAgentName } from "./agents/registry.js";
+import { discoverProjectConfig, resolveConfigValue } from "./config.js";
 import { runPipeline, runPipelines, type PipelineResult } from "./orchestrator/pipeline.js";
 import { buildMarkdownReport, formatUsdCost, totalCostUsd, usageLine } from "./reporting.js";
 import { getLastRun, getRunById, listRuns } from "./storage/history.js";
@@ -18,6 +19,17 @@ import {
 
 function isRoutingStrategy(value: string): value is RoutingStrategy {
   return value === "keyword" || value === "classify";
+}
+
+// Descoberta acontece uma vez, cedo, e vale pra qualquer comando (run,
+// history, export, ou a TUI) — mesma ideia de descoberta de CLAUDE.md do
+// Claude Code, subindo diretórios a partir do cwd. Avisos de campo inválido
+// aparecem sempre que o arquivo tem algum, não só quando `run` é usado.
+const projectConfig = discoverProjectConfig();
+if (projectConfig && projectConfig.warnings.length > 0) {
+  for (const warning of projectConfig.warnings) {
+    console.error(chalk.yellow(`${projectConfig.path}: ${warning}`));
+  }
 }
 
 // A TUI (zero subcomando) aceita a flag --no-mascot direto, sem passar pelo
@@ -39,7 +51,16 @@ if (isTuiInvocation) {
     process.exit(1);
   }
   const { startTui } = await import("./tui/startTui.js");
-  await startTui({ mascotEnabled: !argv.includes(NO_MASCOT_FLAG) });
+  const cfg = projectConfig?.config;
+  await startTui({
+    // --no-mascot sempre vence; sem a flag, cai pro .orquestradorrc, senão default ligado.
+    mascotEnabled: argv.includes(NO_MASCOT_FLAG) ? false : (cfg?.mascot ?? true),
+    initialForcedAgent: cfg?.agent,
+    initialRouting: cfg?.routing,
+    initialAutoMode: cfg?.auto,
+    maxRetries: cfg?.maxRetries,
+    retryBaseDelayMs: cfg?.retryBaseDelayMs,
+  });
   process.exit(0);
 }
 
@@ -116,7 +137,6 @@ program
     "--routing <estrategia>",
     'Estratégia de roteamento: "keyword" (padrão, por palavra-chave) ou "classify" ' +
       "(classifica toda tarefa via claude, sem tentar keyword antes)",
-    "keyword",
   )
   .option(
     "--auto",
@@ -134,8 +154,17 @@ program
       process.exitCode = 1;
       return;
     }
-    const forceAgent = opts.agent as AgentName | undefined;
-    const routing = opts.routing as RoutingStrategy | undefined;
+    // Prioridade em cada campo: flag de CLI > .orquestradorrc do projeto >
+    // default global (aplicado mais embaixo, em pipeline.ts/agents/shared.ts,
+    // quando o valor final ainda é undefined aqui).
+    const cfg = projectConfig?.config;
+    const forceAgent = resolveConfigValue(opts.agent as AgentName | undefined, cfg?.agent);
+    const routing = resolveConfigValue(opts.routing as RoutingStrategy | undefined, cfg?.routing);
+    const auto = resolveConfigValue(opts.auto, cfg?.auto);
+    // maxRetries/retryBaseDelayMs não têm flag de CLI própria hoje — só
+    // .orquestradorrc ou o default global de runAgentCommand.
+    const maxRetries = cfg?.maxRetries;
+    const retryBaseDelayMs = cfg?.retryBaseDelayMs;
 
     if (tarefas.length === 1) {
       const tarefa = tarefas[0]!;
@@ -145,7 +174,9 @@ program
           task: tarefa,
           forceAgent,
           routing,
-          auto: opts.auto,
+          auto,
+          maxRetries,
+          retryBaseDelayMs,
           onRetry: (agent, info) => {
             spinner.stop();
             printRetry(agent, info);
@@ -177,7 +208,9 @@ program
       tasks: tarefas,
       forceAgent,
       routing,
-      auto: opts.auto,
+      auto,
+      maxRetries,
+      retryBaseDelayMs,
       onTaskRetry: (index, agent, info) => {
         printRetry(agent, info, `[Tarefa ${index + 1}/${tarefas.length}] `);
       },
@@ -222,13 +255,25 @@ program
 
 program
   .command("history")
-  .description("Lista execuções passadas")
+  .description(
+    "Lista execuções passadas (só do projeto atual quando há um .orquestradorrc por perto; --all pro histórico completo)",
+  )
   .option("--last", "Mostra detalhes da última execução")
-  .action((opts: { last?: boolean }) => {
+  .option("--all", "Ignora o filtro por projeto (.orquestradorrc) e mostra o histórico completo")
+  .action((opts: { last?: boolean; all?: boolean }) => {
+    const scopeToProject = !opts.all && projectConfig !== undefined;
+    const listOptions = scopeToProject ? { projectRoot: projectConfig!.dir } : {};
+    const emptyMessage = scopeToProject
+      ? "Nenhuma execução registrada ainda neste projeto (use --all pro histórico completo)."
+      : "Nenhuma execução registrada ainda.";
+    if (scopeToProject) {
+      console.log(chalk.dim(`Mostrando só execuções deste projeto (${projectConfig!.dir}) — use --all pro histórico completo.\n`));
+    }
+
     if (opts.last) {
-      const run = getLastRun();
+      const run = getLastRun(listOptions);
       if (!run) {
-        console.log("Nenhuma execução registrada ainda.");
+        console.log(emptyMessage);
         return;
       }
       console.log(chalk.bold(`Run ${run.id} — ${run.task}`));
@@ -256,9 +301,9 @@ program
       return;
     }
 
-    const runs = listRuns();
+    const runs = listRuns(20, listOptions);
     if (runs.length === 0) {
-      console.log("Nenhuma execução registrada ainda.");
+      console.log(emptyMessage);
       return;
     }
     for (const run of runs) {

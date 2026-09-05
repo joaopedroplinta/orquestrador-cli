@@ -20,7 +20,24 @@ Requisitos:
   orquestrador nunca lida com login/credenciais, só assume que os dois
   comandos funcionam no PATH.
 
+### Via npm (recomendado)
+
 ```bash
+npm install -g orquestrador-cli
+orquestrador --version
+```
+
+> **Nota:** o pacote ainda não foi publicado no npm — o `package.json` já
+> está pronto pra isso (`files`, metadados, `prepublishOnly` rodando testes +
+> build antes de qualquer `npm publish`), mas a publicação em si é manual e
+> ainda não aconteceu. Até lá, use a instalação a partir do código-fonte
+> abaixo.
+
+### A partir do código-fonte (desenvolvimento)
+
+```bash
+git clone https://github.com/joaopedroplinta/orquestrador-cli.git
+cd orquestrador-cli
 npm install
 npm run build
 npm link        # opcional: expõe o binário `orquestrador` globalmente
@@ -328,14 +345,37 @@ Lista as execuções passadas, mais recente primeiro:
 orquestrador history
 ```
 
+**Filtrado por projeto quando há um `.orquestradorrc` por perto** (ver
+"Configuração por projeto" abaixo): se `orquestrador` acha um `.orquestradorrc`
+subindo a partir do diretório atual, `history` mostra só as execuções
+rodadas dentro daquele projeto (o diretório do `.orquestradorrc` ou
+qualquer subpasta dele) — não o histórico global inteiro. Um aviso aparece
+no topo confirmando o filtro:
+
+```
+Mostrando só execuções deste projeto (/home/voce/meu-projeto) — use --all pro histórico completo.
+```
+
+Sem `.orquestradorrc` nenhum encontrado, `history` continua mostrando tudo,
+sem filtro nenhum (comportamento de sempre). Pra ver o histórico completo
+mesmo dentro de um projeto configurado, use `--all`:
+
+```bash
+orquestrador history --all
+```
+
 ### `orquestrador history --last`
 
 Mostra o detalhe da última execução — cada etapa, agente, prompt enviado
 (já com o contexto da etapa anterior embutido, quando houver), output,
-duração, e uma referência de qual etapa alimentou qual:
+duração, e uma referência de qual etapa alimentou qual. Segue a mesma regra
+de filtro por projeto/`--all` do `history` normal — "última" quer dizer "a
+mais recente deste projeto" quando há um `.orquestradorrc`, não a mais
+recente entre todos os projetos:
 
 ```bash
 orquestrador history --last
+orquestrador history --last --all   # ignora o filtro por projeto
 ```
 
 **Tokens e custo, quando disponível:** o Claude Code expõe uso de tokens e
@@ -370,7 +410,71 @@ orquestrador export c97f3333 --output relatorio.md     # ou -o, salva num arquiv
 em `orquestrador history` (mesma ideia de hash curto do `git`). Se não
 achar uma correspondência exata, tenta por prefixo e usa a execução mais
 recente em caso de mais de uma bater. Um id que não existe retorna erro
-com exit code 1, sem gerar nada.
+com exit code 1, sem gerar nada. **Não é afetado pelo filtro por
+projeto** — o id já identifica uma execução específica sem ambiguidade
+nenhuma, então não faz sentido "limitar" o `export` a um projeto.
+
+## Configuração por projeto (`.orquestradorrc`)
+
+Um arquivo `.orquestradorrc` opcional, em JSON, na raiz de um projeto,
+configura o comportamento padrão do `orquestrador` **só nesse projeto** —
+sem precisar repetir flags toda vez nem afetar outros projetos na mesma
+máquina.
+
+```json
+{
+  "agent": "claude",
+  "routing": "keyword",
+  "auto": false,
+  "maxRetries": 5,
+  "retryBaseDelayMs": 2000,
+  "mascot": false
+}
+```
+
+Todos os campos são opcionais — configure só o que quiser mudar do padrão:
+
+| Campo              | Equivale a         | Efeito                                                                 |
+| ------------------ | ------------------ | ----------------------------------------------------------------------- |
+| `agent`             | `--agent`           | Força esse agente pra toda tarefa rodada neste projeto.                 |
+| `routing`           | `--routing`         | Estratégia de roteamento (`"keyword"` ou `"classify"`).                 |
+| `auto`              | `--auto`            | Liga a classificação via IA quando a palavra-chave não decide nada.     |
+| `maxRetries`        | *(sem flag ainda)*  | Máximo de tentativas de retry por etapa em erro transitório.            |
+| `retryBaseDelayMs`  | *(sem flag ainda)*  | Base do backoff exponencial do retry, em milissegundos.                 |
+| `mascot`            | `--no-mascot`       | Liga (`true`) ou desliga (`false`) o mascote na TUI aberta daqui.        |
+
+**Descoberta:** igual ao `CLAUDE.md` do Claude Code — `orquestrador`
+procura um `.orquestradorrc` a partir do diretório onde foi rodado,
+subindo um nível de cada vez até achar um ou chegar na raiz do sistema de
+arquivos. O primeiro que encontrar (o mais próximo do diretório atual)
+vale — não é feita fusão de vários níveis.
+
+**Prioridade em cada campo:** flag de CLI > `.orquestradorrc` do projeto >
+default global do orquestrador. `maxRetries`/`retryBaseDelayMs` ainda não
+têm uma flag de CLI própria, então pra eles a prioridade é só
+`.orquestradorrc` > default global.
+
+```bash
+cd meu-projeto   # tem .orquestradorrc com "agent": "claude"
+orquestrador run "pesquisar a versão do node"
+# → roda no claude mesmo com keyword de pesquisa, porque o projeto força isso
+
+orquestrador run "pesquisar a versão do node" --agent antigravity
+# → roda no antigravity — a flag de CLI sempre vence sobre o .orquestradorrc
+```
+
+Um campo com valor ou tipo inválido (`"agent": "gpt-5"`, `"maxRetries":
+"cinco"`) é ignorado com um aviso claro no início do comando — só aquele
+campo é descartado, o resto do arquivo continua valendo:
+
+```
+.orquestradorrc: "agent": "gpt-5" inválido (use "claude" ou "antigravity") — ignorado.
+```
+
+Vale tanto pro `orquestrador run` quanto pra TUI (`orquestrador` sem
+argumentos) aberta dentro do projeto — `agent`/`routing`/`auto` seedam o
+modo inicial da tela (ainda dá pra trocar depois com `/agent`/`/routing`/
+`/auto`), e `mascot` seeda se o mascote aparece ou não.
 
 ## Arquitetura
 
@@ -441,20 +545,35 @@ com exit code 1, sem gerar nada.
   texto de resposta e o uso de tokens/custo real — só ele, não o
   antigravity (ver "Limitações conhecidas" pro porquê).
 - **`src/storage/history.ts`** — persistência em SQLite
-  (`~/.orquestrador/history.db`). Cada etapa grava `fed_by_step_id`
-  apontando pro id da etapa anterior cujo output virou seu contexto —
-  é o que permite reconstruir a cadeia de handoff depois, via
-  `history --last` —, `retries` (JSON com cada tentativa que falhou antes
-  do resultado final daquela etapa), e `usage` (JSON com tokens/custo,
-  quando o agente expõe isso). `getRunById(id)` busca uma execução por id
-  completo ou prefixo de 8 caracteres, usado pelo `export`.
+  (`~/.orquestrador/history.db`, sempre global — um banco só, não por
+  projeto). Cada etapa grava `fed_by_step_id` apontando pro id da etapa
+  anterior cujo output virou seu contexto — é o que permite reconstruir a
+  cadeia de handoff depois, via `history --last` —, `retries` (JSON com
+  cada tentativa que falhou antes do resultado final daquela etapa), e
+  `usage` (JSON com tokens/custo, quando o agente expõe isso). Cada *run*
+  grava `cwd` (`process.cwd()` no momento do `startRun()`) — é o que
+  permite ao `history`/`history --last` filtrar por projeto
+  (`isWithinProjectScope`, função pura: cwd é a raiz do projeto ou um
+  descendente dela). `getRunById(id)` busca uma execução por id completo
+  ou prefixo de 8 caracteres, usado pelo `export` — sem filtro de projeto,
+  de propósito (ver "Configuração por projeto" acima).
+- **`src/config.ts`** — `discoverProjectConfig()` acha e lê o
+  `.orquestradorrc` mais próximo, subindo diretórios a partir do cwd (só
+  fs, sem tocar em SQLite); `parseOrquestradorConfig()` valida campo por
+  campo, descartando com aviso o que for inválido em vez de invalidar o
+  arquivo inteiro; `resolveConfigValue(cliValue, projectValue)` implementa
+  a prioridade CLI > projeto (o default global já embutido mais embaixo,
+  em `pipeline.ts`/`agents/shared.ts`, quando o valor ainda chega
+  `undefined` até lá).
 - **`src/reporting.ts`** — `buildMarkdownReport(run)`, função pura que
   monta o relatório markdown do `export` a partir de um `HistoryRun` — sem
   I/O nenhum, só formatação, testável com dados mockados.
 - **`src/cli.ts`** — entrypoint (`commander`) com os comandos `run`,
-  `history` e `export`, spinner (`ora`) e cores (`chalk`). Sem argumentos
-  (zero subcomando), importa dinamicamente `src/tui/startTui.tsx` — quem
-  só usa `run`/`history`/`export` não paga o custo de carregar Ink/React.
+  `history` e `export`, spinner (`ora`) e cores (`chalk`). Descobre o
+  `.orquestradorrc` uma vez, no início, e reaproveita pra todos os
+  comandos (inclusive a TUI). Sem argumentos (zero subcomando), importa
+  dinamicamente `src/tui/startTui.tsx` — quem só usa `run`/`history`/
+  `export` não paga o custo de carregar Ink/React.
 - **`src/tui/`** — tela interativa em Ink/React (`App.tsx` + `startTui.tsx`
   + `commands.ts` + `PromptInput.tsx` + `mascot.ts`/`Mascot.tsx`). O
   mascote segue a mesma separação de `commands.ts`: `mascot.ts` é dado/
@@ -540,7 +659,34 @@ concorrente: um com timers falsos provando isso de forma determinística
 disparar), e outro com timers de verdade medindo tempo de parede (a
 chamada sem retry resolve em bem menos de 1s mesmo com a outra presa no
 backoff, e o tempo total do par fica perto do delay de uma tarefa sozinha,
-não da soma das duas).
+não da soma das duas), e `retryBaseDelayMs` customizado mudando a base do
+backoff (ex.: um `.orquestradorrc` pedindo delays maiores).
+
+`src/config.test.ts` cobre `parseOrquestradorConfig` (config completo e
+válido, objeto vazio válido, JSON inválido ou que não é um objeto
+ignorando o arquivo inteiro com aviso, cada campo — `agent`/`routing`/
+`auto`/`maxRetries`/`retryBaseDelayMs`/`mascot` — sendo validado e
+descartado individualmente quando inválido sem afetar os outros campos, e
+múltiplos campos inválidos gerando um aviso cada), `resolveConfigValue`
+(prioridade CLI > projeto > `undefined`), e `discoverProjectConfig` (acha
+o `.orquestradorrc` no próprio diretório de partida, sobe diretórios até
+achar o mais próximo — mesma ideia do `CLAUDE.md` do Claude Code —, o mais
+próximo do cwd vence sobre um mais acima sem fundir os dois, `undefined`
+quando não acha nenhum subindo até a raiz do sistema de arquivos, e os
+avisos de parsing chegam até quem descobriu o arquivo). Usa diretórios
+temporários reais (não mocka `fs`) pra testar a subida de diretório de
+verdade.
+
+`src/storage/history.test.ts` cobre `isWithinProjectScope` (a lógica de
+"esse cwd pertence a este projeto?"): bate exato na própria raiz do
+projeto, bate em qualquer descendente dela, **não** bate num diretório
+irmão com prefixo parecido (`/projeto-outro` não é descendente de
+`/projeto`) nem num diretório pai do projeto nem em algo completamente não
+relacionado, e cwd ausente (runs de antes dessa coluna existir) nunca bate
+em projeto nenhum. A integração completa (`listRuns`/`getLastRun`
+filtrando de verdade via SQLite, `--all` ignorando o filtro) foi validada
+manualmente — mesma decisão já tomada pro resto de `storage/history.ts`
+(ver "Limitações conhecidas" e `CLAUDE.md`).
 
 `src/agents/registry.test.ts` cobre a estrutura do registro de agentes:
 `AGENT_REGISTRY` tem exatamente as entradas claude/antigravity, cada
@@ -642,10 +788,12 @@ histórico completo.
   guardada, não um mecanismo genérico).
 - Retry automático não tenta de novo `PipelineCancelledError` nem erro de
   roteamento ambíguo — só erros de execução do agente (`AgentError`) que
-  parecem transitórios. O número de retries (`maxRetries`, padrão 3) e o
-  backoff (1s/2s/4s, dobrando a cada tentativa) não são configuráveis via
-  flag do CLI ainda — só por quem chama `runPipeline`/`runPipelines`
-  programaticamente.
+  parecem transitórios. O número de retries (`maxRetries`, padrão 3) e a
+  base do backoff (`retryBaseDelayMs`, padrão 1000ms, dobrando a cada
+  tentativa) são configuráveis via `.orquestradorrc`, mas **ainda não têm
+  uma flag de CLI própria** (`--max-retries`, por exemplo) — só quem chama
+  `runPipeline`/`runPipelines` programaticamente, ou configura por
+  projeto, tem controle fino sobre isso hoje.
 - A heurística que separa "argumento inválido" (não retenta) de "exit code
   momentâneo" (retenta) é baseada em palavras comuns no stderr ("unknown
   option", "usage:", etc.) — **nunca foi validada contra a mensagem real**
@@ -693,6 +841,20 @@ histórico completo.
   `src/agents/registry.ts`.
 - `--dangerously-skip-permissions` do Claude Code nunca é habilitado por
   este projeto.
+- **`.orquestradorrc`**: só o primeiro arquivo encontrado subindo os
+  diretórios vale — não tem fusão entre um `.orquestradorrc` de um
+  monorepo na raiz e outro numa subpasta específica (o mais próximo do
+  cwd simplesmente ganha, o de cima é ignorado por completo). `export
+  <runId>` não respeita o filtro por projeto (recebe um id explícito, não
+  faz sentido "limitar" isso — ver "Configuração por projeto"). O pacote
+  ainda não foi publicado no npm de verdade — `package.json` já está
+  pronto (metadados, `files`, `prepublishOnly`), mas falta rodar
+  `npm publish` manualmente.
+- O filtro de histórico por projeto (`isWithinProjectScope`, em
+  `storage/history.ts`) é testado como função pura; a integração completa
+  com SQLite (`listRuns`/`getLastRun` filtrando de verdade, `--all`
+  ignorando o filtro) foi validada manualmente, não via teste automatizado
+  — mesma decisão já documentada pro resto de `storage/history.ts`.
 
 ## Licença
 

@@ -62,6 +62,8 @@ export interface RunPipelineOptions {
   onStepComplete?: (result: AgentRunResult) => void;
   /** Máximo de tentativas de RETRY por etapa em erro transitório (não conta a tentativa inicial) — padrão 3. */
   maxRetries?: number;
+  /** Base do backoff exponencial em ms — padrão 1000, ver DEFAULT_RETRY_BASE_DELAY_MS em agents/shared.ts. */
+  retryBaseDelayMs?: number;
   /** Chamado antes de cada espera de backoff entre tentativas de uma etapa — pra não parecer que travou. */
   onRetry?: (agent: AgentName, info: AgentRetryAttempt & { maxRetries: number }) => void;
 }
@@ -138,6 +140,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
         // de fingir que aquele chunk único é "streaming".
         onChunk: streamsIncrementally && options.onChunk ? (chunk) => options.onChunk!(taskStep.agent, chunk) : undefined,
         maxRetries: options.maxRetries,
+        retryBaseDelayMs: options.retryBaseDelayMs,
         onRetry: options.onRetry ? (info) => options.onRetry!(taskStep.agent, info) : undefined,
       });
 
@@ -194,6 +197,7 @@ export interface RunManyOptions {
   onTaskChunk?: (taskIndex: number, agent: AgentName, chunk: string) => void;
   onTaskStepComplete?: (taskIndex: number, result: AgentRunResult) => void;
   maxRetries?: number;
+  retryBaseDelayMs?: number;
   onTaskRetry?: (taskIndex: number, agent: AgentName, info: AgentRetryAttempt & { maxRetries: number }) => void;
 }
 
@@ -215,6 +219,7 @@ export async function runPipelines(options: RunManyOptions): Promise<RunManyResu
         routing: options.routing,
         auto: options.auto,
         maxRetries: options.maxRetries,
+        retryBaseDelayMs: options.retryBaseDelayMs,
         onStepStart: options.onTaskStepStart ? (agent) => options.onTaskStepStart!(index, agent) : undefined,
         onChunk: options.onTaskChunk ? (agent, chunk) => options.onTaskChunk!(index, agent, chunk) : undefined,
         onStepComplete: options.onTaskStepComplete ? (result) => options.onTaskStepComplete!(index, result) : undefined,

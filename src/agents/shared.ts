@@ -9,7 +9,7 @@ import {
 
 export const DEFAULT_TIMEOUT_MS = 3 * 60 * 1000;
 export const DEFAULT_MAX_RETRIES = 3;
-const RETRY_BASE_DELAY_MS = 1000;
+export const DEFAULT_RETRY_BASE_DELAY_MS = 1000;
 
 export interface RunAgentCommandOptions {
   agent: AgentName;
@@ -27,6 +27,8 @@ export interface RunAgentCommandOptions {
   onChunk?: (chunk: string) => void;
   /** Máximo de tentativas de RETRY (não conta a tentativa inicial) — padrão 3. */
   maxRetries?: number;
+  /** Base do backoff exponencial (delay = base * 2^(tentativa-1)) — padrão 1000ms. */
+  retryBaseDelayMs?: number;
   /** Chamado antes de cada espera de backoff, com detalhes da tentativa que acabou de falhar. */
   onRetry?: (info: AgentRetryAttempt & { maxRetries: number }) => void;
 }
@@ -41,7 +43,12 @@ function sleep(ms: number): Promise<void> {
 // encontrado ou argumento inválido, por exemplo, falham direto na primeira
 // tentativa, sem sentido repetir algo que vai dar o mesmo erro de novo.
 export async function runAgentCommand(options: RunAgentCommandOptions): Promise<AgentRunResult> {
-  const { maxRetries = DEFAULT_MAX_RETRIES, onRetry, ...attemptOptions } = options;
+  const {
+    maxRetries = DEFAULT_MAX_RETRIES,
+    retryBaseDelayMs = DEFAULT_RETRY_BASE_DELAY_MS,
+    onRetry,
+    ...attemptOptions
+  } = options;
   const retries: AgentRetryAttempt[] = [];
 
   for (let attempt = 1; ; attempt++) {
@@ -62,7 +69,7 @@ export async function runAgentCommand(options: RunAgentCommandOptions): Promise<
         throw error;
       }
 
-      const delayMs = RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
+      const delayMs = retryBaseDelayMs * 2 ** (attempt - 1);
       const attemptInfo: AgentRetryAttempt = {
         attempt,
         kind: error.kind,
@@ -77,7 +84,7 @@ export async function runAgentCommand(options: RunAgentCommandOptions): Promise<
   }
 }
 
-type AttemptOnceOptions = Omit<RunAgentCommandOptions, "maxRetries" | "onRetry">;
+type AttemptOnceOptions = Omit<RunAgentCommandOptions, "maxRetries" | "retryBaseDelayMs" | "onRetry">;
 
 async function attemptOnce(options: AttemptOnceOptions): Promise<AgentRunResult> {
   const { agent, command, args, prompt, timeoutMs = DEFAULT_TIMEOUT_MS, onChunk } = options;
