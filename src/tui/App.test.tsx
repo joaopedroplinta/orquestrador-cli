@@ -107,6 +107,22 @@ describe("App (TUI)", () => {
     expect(lastFrame()).toContain("❯ ok");
   });
 
+  it('prefixo "agente:" na tarefa força a prévia de rota, mesmo com keyword indicando outro agente', async () => {
+    mockedRunPipeline.mockImplementation(
+      (options) => new Promise((resolve) => resolve({ runId: "run-1", task: options.task, steps: [] })),
+    );
+
+    const { lastFrame, stdin } = render(<App />);
+    // "implementar" normalmente roteia pro claude — o prefixo força antigravity mesmo assim.
+    await submit(stdin, "antigravity: implementar algo");
+    await tick();
+
+    expect(lastFrame()).toContain("→ antigravity");
+    expect(mockedRunPipeline).toHaveBeenCalledWith(
+      expect.objectContaining({ task: "antigravity: implementar algo" }),
+    );
+  });
+
   it("mostra o output chegando ao vivo enquanto a etapa roda (antes de terminar)", async () => {
     let capturedOptions!: RunPipelineOptions;
     mockedRunPipeline.mockImplementation((options) => {
@@ -385,5 +401,26 @@ describe("App (TUI) — múltiplas tarefas em paralelo (';')", () => {
     expect(frame).not.toContain("Não consegui identificar automaticamente"); // nunca abre o prompt embutido
     expect(frame).toContain("Não foi possível decidir");
     expect(frame).toContain("digite uma tarefa..."); // input voltou a ficar ativo, não travou esperando resposta
+  });
+
+  it('prefixo "agente:" por tarefa dentro do lote força cada uma pro agente certo, mesmo com keyword contrária', async () => {
+    let capturedOptions!: RunManyOptions;
+    mockedRunPipelines.mockImplementation(async (options) => {
+      capturedOptions = options;
+      return new Promise(() => {}); // só interessa a prévia de rota, não o resultado
+    });
+
+    const { lastFrame, stdin } = render(<App />);
+    // as duas tarefas têm keyword "implementar" (routing normal levaria as
+    // duas pro claude) — os prefixos forçam agentes opostos e diferentes entre si.
+    await submit(stdin, "claude: implementar X; antigravity: implementar Y");
+    await tick();
+
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("Tarefa 1/2");
+    expect(frame).toContain("→ claude");
+    expect(frame).toContain("Tarefa 2/2");
+    expect(frame).toContain("→ antigravity");
+    expect(capturedOptions.tasks).toEqual(["claude: implementar X", "antigravity: implementar Y"]);
   });
 });
