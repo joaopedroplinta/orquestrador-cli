@@ -3,7 +3,7 @@ import { basename } from "node:path";
 import { Box, Static, Text, useApp } from "ink";
 import Spinner from "ink-spinner";
 import { Fragment, useCallback, useEffect, useState } from "react";
-import { AGENT_REGISTRY, isAgentName } from "../agents/registry.js";
+import { AGENT_NAMES, AGENT_REGISTRY, isAgentName } from "../agents/registry.js";
 import { runPipeline, runPipelines } from "../orchestrator/pipeline.js";
 import { parseTaskAgentPrefix, planTask } from "../orchestrator/router.js";
 import { runTeam, type TeamState } from "../team/coordinator.js";
@@ -124,16 +124,33 @@ function describeError(error: unknown): { kind: "error" | "cancelled"; message: 
 // ─── Componentes de UI ────────────────────────────────────────────────────────
 
 function Banner() {
+  // Largura explícita porque `width="100%"` não resolve dentro de <Static>,
+  // que renderiza fora do fluxo de layout — sem isso a caixa do banner sai
+  // mais estreita que a do input logo abaixo. Como <Static> nunca re-renderiza,
+  // congelar a largura na montagem é consistente com a própria semântica dele.
+  const width = process.stdout.columns ?? 80;
   return (
-    <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1} marginBottom={1}>
+    // Sem marginBottom: a StatusLine logo abaixo já tem marginTop, e os dois
+    // juntos abriam duas linhas em branco.
+    <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1} width={width}>
       <Box justifyContent="space-between">
         <Text bold color="cyan">⚡ orquestrador</Text>
-        <Text color="green">● 3 agentes prontos</Text>
+        <Text color="green">● {AGENT_NAMES.length} agentes prontos</Text>
       </Box>
       <Text dimColor>Planeje, execute e revise tarefas no mesmo projeto.</Text>
-      <Text dimColor>
-        <Text color="green">tarefa</Text> executar · <Text color="green">;</Text> paralelo · <Text color="green">/team</Text> equipe · <Text color="green">/help</Text> comandos
-      </Text>
+      {/* O banner é o único lugar que ENSINA — renderiza uma vez, dentro do
+          <Static>. A StatusLine abaixo só mostra estado, pra não repetir isto
+          em toda tela. */}
+      <Box marginTop={1} flexDirection="column">
+        <Text dimColor>
+          <Text color="green">tarefa</Text> executar · <Text color="green">;</Text> paralelo ·{" "}
+          <Text color="green">agente:</Text> forçar · <Text color="green">/team</Text> equipe
+        </Text>
+        <Text dimColor>
+          <Text color="cyan">Tab</Text> completa · <Text color="cyan">↑/↓</Text> histórico ·{" "}
+          <Text color="cyan">/help</Text> todos os comandos · <Text color="cyan">Ctrl+C</Text> sair
+        </Text>
+      </Box>
     </Box>
   );
 }
@@ -384,28 +401,28 @@ function StatusLine({
           </Text>
         )}
       </Box>
+      {/* Só ESTADO — nada de atalhos aqui. Ensinar é papel do banner (uma vez)
+          e do /help; repetir a cada tela é ruído permanente. Só o que está
+          diferente do padrão ganha destaque; o resto fica apagado. */}
       <Box>
-        <Text dimColor>{"agente: "}</Text>
+        <Text dimColor>{"agente "}</Text>
         {mode.forcedAgent ? (
           <Text color={agentColor(mode.forcedAgent)} bold>
-            {mode.forcedAgent} (forçado)
+            {mode.forcedAgent}
           </Text>
         ) : (
           <Text dimColor>automático</Text>
         )}
-        <Text dimColor>{"   roteamento: "}</Text>
-        <Text bold={mode.routing === "classify"}>{mode.routing}</Text>
-        <Text dimColor>{"   auto: "}</Text>
-        <Text color={mode.autoMode ? "green" : undefined} dimColor={!mode.autoMode} bold={mode.autoMode}>
-          {mode.autoMode ? "ligado" : "desligado"}
+        <Text dimColor>{"  ·  roteamento "}</Text>
+        <Text dimColor={mode.routing !== "classify"} color={mode.routing === "classify" ? "yellow" : undefined}>
+          {mode.routing}
         </Text>
-      </Box>
-      <Box>
-        <Text dimColor>
-          <Text color="gray">Tab</Text> completar · <Text color="gray">↑/↓</Text> histórico ·{" "}
-          <Text color="gray">/help</Text> comandos · <Text color="gray">/status</Text> diagnóstico ·{" "}
-          <Text color="gray">/summary</Text> resumo · <Text color="gray">Ctrl+C</Text> sair
-        </Text>
+        {mode.autoMode && (
+          <>
+            <Text dimColor>{"  ·  "}</Text>
+            <Text color="green">auto</Text>
+          </>
+        )}
       </Box>
     </Box>
   );
