@@ -2,7 +2,7 @@
 // pra adicionar um agente novo. Ver "Adicionando um novo agente" no
 // CLAUDE.md pro passo a passo completo (o resto da fiação vive em
 // `agents/registry.ts`, derivada a partir dessa union).
-export type AgentName = "claude" | "antigravity";
+export type AgentName = "claude" | "antigravity" | "codex";
 
 /** Interface que todo wrapper de agente implementa — ver agents/registry.ts e CLAUDE.md. */
 export type AgentRunner = (options: AgentRunOptions) => Promise<AgentRunResult>;
@@ -22,6 +22,9 @@ export type AgentRunner = (options: AgentRunOptions) => Promise<AgentRunResult>;
 export type RoutingStrategy = "keyword" | "classify";
 
 export interface AgentRunOptions {
+  /** Diretório exclusivo do processo; nunca muda process.cwd() global. */
+  cwd?: string;
+  signal?: AbortSignal;
   prompt: string;
   context?: string;
   timeoutMs?: number;
@@ -68,6 +71,7 @@ export interface AgentRunResult {
 }
 
 export type AgentErrorKind =
+  | "cancelled"
   | "timeout"
   | "command_not_found"
   | "invalid_argument"

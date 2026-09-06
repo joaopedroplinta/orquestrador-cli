@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { applyModeCommand, INITIAL_MODE_STATE, parseInput } from "./commands.js";
+import {
+  applyModeCommand,
+  getCommandSuggestions,
+  INITIAL_MODE_STATE,
+  parseInput,
+  SLASH_COMMANDS,
+} from "./commands.js";
 
 describe("parseInput", () => {
   it("texto sem barra vira uma tarefa", () => {
@@ -31,7 +37,26 @@ describe("parseInput", () => {
     expect(parseInput("/history")).toEqual({ kind: "history" });
   });
 
+  it("/team preserva o texto da tarefa e exige uma tarefa", () => {
+    expect(parseInput("/team Implementar Login com JWT")).toEqual({ kind: "team", task: "Implementar Login com JWT" });
+    expect(parseInput("/team").kind).toBe("error");
+  });
+
+  it("/help vira help", () => {
+    expect(parseInput("/help")).toEqual({ kind: "help" });
+  });
+
+  it("/status e /doctor viram status", () => {
+    expect(parseInput("/status")).toEqual({ kind: "status" });
+    expect(parseInput("/doctor")).toEqual({ kind: "status" });
+  });
+
+  it("/clear vira clear", () => {
+    expect(parseInput("/clear")).toEqual({ kind: "clear" });
+  });
+
   it("/agent claude e /agent antigravity forçam o agente", () => {
+    expect(parseInput("/agent codex")).toEqual({ kind: "set-agent", agent: "codex" });
     expect(parseInput("/agent claude")).toEqual({ kind: "set-agent", agent: "claude" });
     expect(parseInput("/agent antigravity")).toEqual({ kind: "set-agent", agent: "antigravity" });
   });
@@ -59,10 +84,6 @@ describe("parseInput", () => {
     expect(parseInput("/routing").kind).toBe("error");
   });
 
-  it("/mascot vira toggle-mascot (sem argumento, é só um liga/desliga)", () => {
-    expect(parseInput("/mascot")).toEqual({ kind: "toggle-mascot" });
-  });
-
   it("comando desconhecido retorna erro amigável (nunca vira tarefa nem lança exceção)", () => {
     const result = parseInput("/foo");
     expect(result.kind).toBe("error");
@@ -78,10 +99,33 @@ describe("parseInput", () => {
   });
 });
 
+describe("getCommandSuggestions", () => {
+  it("retorna lista vazia para texto sem barra inicial", () => {
+    expect(getCommandSuggestions("pesquisar")).toEqual([]);
+    expect(getCommandSuggestions("")).toEqual([]);
+  });
+
+  it("retorna todos os comandos visíveis quando apenas '/' é digitado", () => {
+    const suggestions = getCommandSuggestions("/");
+    const visibleCount = SLASH_COMMANDS.filter((c) => !c.hidden).length;
+    expect(suggestions.length).toBe(visibleCount);
+  });
+
+  it("retorna sugestões filtradas por prefixo", () => {
+    const suggestions = getCommandSuggestions("/he");
+    expect(suggestions.some((c) => c.name === "help")).toBe(true);
+    expect(suggestions.every((c) => c.name.startsWith("he") || c.aliases?.some((a) => a.startsWith("he")))).toBe(true);
+  });
+
+  it("retorna vazio após espaço", () => {
+    expect(getCommandSuggestions("/agent ")).toEqual([]);
+  });
+});
+
 describe("applyModeCommand", () => {
   it("/agent claude força o agente no estado", () => {
     const next = applyModeCommand(INITIAL_MODE_STATE, { kind: "set-agent", agent: "claude" });
-    expect(next).toEqual({ forcedAgent: "claude", autoMode: false, routing: "keyword", mascotEnabled: true });
+    expect(next).toEqual({ forcedAgent: "claude", autoMode: false, routing: "keyword" });
   });
 
   it("/agent auto reseta forcedAgent pra null, mantendo o resto do estado", () => {
@@ -89,10 +133,9 @@ describe("applyModeCommand", () => {
       forcedAgent: "claude",
       autoMode: true,
       routing: "keyword",
-      mascotEnabled: true,
     };
     const next = applyModeCommand(forced, { kind: "set-agent", agent: null });
-    expect(next).toEqual({ forcedAgent: null, autoMode: true, routing: "keyword", mascotEnabled: true });
+    expect(next).toEqual({ forcedAgent: null, autoMode: true, routing: "keyword" });
   });
 
   it("/auto alterna autoMode: desligado -> ligado -> desligado", () => {
@@ -105,29 +148,23 @@ describe("applyModeCommand", () => {
 
   it("/routing classify muda a estratégia, mantendo o resto do estado intacto", () => {
     const next = applyModeCommand(INITIAL_MODE_STATE, { kind: "set-routing", routing: "classify" });
-    expect(next).toEqual({ forcedAgent: null, autoMode: false, routing: "classify", mascotEnabled: true });
+    expect(next).toEqual({ forcedAgent: null, autoMode: false, routing: "classify" });
   });
 
-  it("/mascot alterna mascotEnabled: ligado -> desligado -> ligado", () => {
-    let state = INITIAL_MODE_STATE;
-    state = applyModeCommand(state, { kind: "toggle-mascot" });
-    expect(state.mascotEnabled).toBe(false);
-    state = applyModeCommand(state, { kind: "toggle-mascot" });
-    expect(state.mascotEnabled).toBe(true);
-  });
-
-  it("comandos que não afetam o modo (exit, history, error, task) deixam o estado inalterado", () => {
+  it("comandos que não afetam o modo (exit, history, error, task, help, status, clear) deixam o estado inalterado", () => {
     expect(applyModeCommand(INITIAL_MODE_STATE, { kind: "exit" })).toEqual(INITIAL_MODE_STATE);
     expect(applyModeCommand(INITIAL_MODE_STATE, { kind: "history" })).toEqual(INITIAL_MODE_STATE);
+    expect(applyModeCommand(INITIAL_MODE_STATE, { kind: "help" })).toEqual(INITIAL_MODE_STATE);
+    expect(applyModeCommand(INITIAL_MODE_STATE, { kind: "status" })).toEqual(INITIAL_MODE_STATE);
+    expect(applyModeCommand(INITIAL_MODE_STATE, { kind: "clear" })).toEqual(INITIAL_MODE_STATE);
     expect(applyModeCommand(INITIAL_MODE_STATE, { kind: "error", message: "x" })).toEqual(INITIAL_MODE_STATE);
     expect(applyModeCommand(INITIAL_MODE_STATE, { kind: "task", text: "x" })).toEqual(INITIAL_MODE_STATE);
   });
 
-  it("forçar agente, ligar --auto, trocar o roteamento e desligar o mascote são independentes entre si", () => {
+  it("forçar agente, ligar --auto e trocar o roteamento são independentes entre si", () => {
     let state = applyModeCommand(INITIAL_MODE_STATE, { kind: "toggle-auto" });
     state = applyModeCommand(state, { kind: "set-agent", agent: "claude" });
     state = applyModeCommand(state, { kind: "set-routing", routing: "classify" });
-    state = applyModeCommand(state, { kind: "toggle-mascot" });
-    expect(state).toEqual({ forcedAgent: "claude", autoMode: true, routing: "classify", mascotEnabled: false });
+    expect(state).toEqual({ forcedAgent: "claude", autoMode: true, routing: "classify" });
   });
 });

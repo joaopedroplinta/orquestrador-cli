@@ -1,39 +1,132 @@
-import { Text, useInput } from "ink";
-import { useRef, useState } from "react";
+import { Box, Text, useInput } from "ink";
+import { useMemo, useRef, useState } from "react";
+import Autocomplete from "./Autocomplete.js";
+import { getCommandSuggestions, type SlashCommandDef } from "./commands.js";
 
 export interface PromptInputProps {
   onSubmit: (value: string) => void;
+  /** Atualiza a TUI com a intenção em edição, sem esperar Enter. */
+  onChange?: (value: string) => void;
   placeholder?: string;
   disabled?: boolean;
 }
 
-// Não usa `ink-text-input`: aquele componente computa o próximo valor a partir
-// da prop `value` capturada no último render ("originalValue"), e chama
-// onChange(nextValue) já pronto. Se duas teclas chegam em sequência rápida
-// demais pro React re-renderizar entre uma e outra (digitação em rajada, ou
-// múltiplos bytes chegando juntos no stdin), o segundo cálculo enxerga a prop
-// desatualizada e descarta o primeiro caractere — bug real, reproduzido tanto
-// com PTY real quanto com ink-testing-library (ver App.test.tsx).
-//
-// Aqui o texto atual mora numa ref (`valueRef`), mutada de forma síncrona e
-// imediata a cada tecla — nunca depende do valor de uma prop/closure de
-// render anterior. `display` (useState) existe só pra disparar o re-render;
-// o valor que ela recebe é sempre `valueRef.current` no momento da chamada,
-// nunca um cálculo incremental que possa ficar obsoleto.
-export default function PromptInput({ onSubmit, placeholder = "", disabled = false }: PromptInputProps) {
+export default function PromptInput({
+  onSubmit,
+  onChange,
+  placeholder = "",
+  disabled = false,
+}: PromptInputProps) {
   const valueRef = useRef("");
   const [display, setDisplay] = useState("");
+  const [selectedIndex, setSelectedIndex] = useState(0);
+
+  // Histórico de inputs enviados na sessão
+  const historyRef = useRef<string[]>([]);
+  const historyIndexRef = useRef<number>(-1);
+  const tempSavedInputRef = useRef<string>("");
+
+  const suggestions: SlashCommandDef[] = useMemo(() => {
+    return getCommandSuggestions(display);
+  }, [display]);
 
   useInput(
     (input, key) => {
-      if (key.upArrow || key.downArrow || key.tab || (key.ctrl && input === "c")) {
+      if (key.ctrl && input === "c") {
+        return;
+      }
+
+      // Autocomplete ativo quando há sugestões disponíveis
+      const isAutocompleteActive = suggestions.length > 0;
+
+      if (key.upArrow) {
+        if (isAutocompleteActive) {
+          setSelectedIndex((prev) => (prev > 0 ? prev - 1 : suggestions.length - 1));
+          return;
+        }
+
+        // Navegação de histórico (↑)
+        const hist = historyRef.current;
+        if (hist.length === 0) return;
+
+        if (historyIndexRef.current === -1) {
+          tempSavedInputRef.current = valueRef.current;
+          historyIndexRef.current = hist.length - 1;
+        } else if (historyIndexRef.current > 0) {
+          historyIndexRef.current -= 1;
+        }
+
+        const targetValue = hist[historyIndexRef.current] ?? "";
+        valueRef.current = targetValue;
+        setDisplay(targetValue);
+        return;
+      }
+
+      if (key.downArrow) {
+        if (isAutocompleteActive) {
+          setSelectedIndex((prev) => (prev < suggestions.length - 1 ? prev + 1 : 0));
+          return;
+        }
+
+        // Navegação de histórico (↓)
+        const hist = historyRef.current;
+        if (hist.length === 0 || historyIndexRef.current === -1) return;
+
+        if (historyIndexRef.current < hist.length - 1) {
+          historyIndexRef.current += 1;
+          const targetValue = hist[historyIndexRef.current] ?? "";
+          valueRef.current = targetValue;
+          setDisplay(targetValue);
+        } else {
+          historyIndexRef.current = -1;
+          valueRef.current = tempSavedInputRef.current;
+          setDisplay(tempSavedInputRef.current);
+        }
+        return;
+      }
+
+      if (key.tab) {
+        if (
+          isAutocompleteActive &&
+          suggestions[selectedIndex] &&
+          display.trim().toLowerCase() !== `/${suggestions[selectedIndex]!.name}`
+        ) {
+          const selected = suggestions[selectedIndex];
+          const completed = `/${selected.name} `;
+          valueRef.current = completed;
+          setDisplay(completed);
+          onChange?.(completed);
+          setSelectedIndex(0);
+        }
         return;
       }
 
       if (key.return) {
+        // A lista sempre disse "Tab/Enter selecionar". Enter agora completa
+        // quando o menu está aberto; um segundo Enter executa o comando.
+        if (
+          isAutocompleteActive &&
+          suggestions[selectedIndex] &&
+          display.trim().toLowerCase() !== `/${suggestions[selectedIndex]!.name}`
+        ) {
+          const completed = `/${suggestions[selectedIndex]!.name} `;
+          valueRef.current = completed;
+          setDisplay(completed);
+          onChange?.(completed);
+          setSelectedIndex(0);
+          return;
+        }
         const value = valueRef.current;
         valueRef.current = "";
         setDisplay("");
+        onChange?.("");
+        setSelectedIndex(0);
+        historyIndexRef.current = -1;
+
+        if (value.trim().length > 0) {
+          historyRef.current.push(value);
+        }
+
         onSubmit(value);
         return;
       }
@@ -41,17 +134,18 @@ export default function PromptInput({ onSubmit, placeholder = "", disabled = fal
       if (key.backspace || key.delete) {
         valueRef.current = valueRef.current.slice(0, -1);
         setDisplay(valueRef.current);
+        onChange?.(valueRef.current);
+        setSelectedIndex(0);
         return;
       }
 
-      // Um "input" pode ter mais de um caractere (colar texto, ou vários bytes
-      // chegando juntos) — sempre acrescido de uma vez, nunca perde nada.
-      // \r/\n embutidos são descartados (prompt de uma linha só); não tentamos
-      // auto-submeter nesse caso, mesma cautela do próprio Ink com paste.
+      // Um "input" pode ter mais de um caractere (colar texto ou múltiplos bytes)
       const cleaned = input.replace(/[\r\n]/g, "");
       if (cleaned) {
         valueRef.current += cleaned;
         setDisplay(valueRef.current);
+        onChange?.(valueRef.current);
+        setSelectedIndex(0);
       }
     },
     { isActive: !disabled },
@@ -61,27 +155,28 @@ export default function PromptInput({ onSubmit, placeholder = "", disabled = fal
     return <Text> </Text>;
   }
 
-  if (display.length > 0) {
-    return (
-      <Text>
-        {display}
-        <Text inverse> </Text>
-      </Text>
-    );
-  }
-
-  if (placeholder.length === 0) {
-    return (
-      <Text>
-        <Text inverse> </Text>
-      </Text>
-    );
-  }
-
   return (
-    <Text>
-      <Text inverse>{placeholder.slice(0, 1)}</Text>
-      <Text dimColor>{placeholder.slice(1)}</Text>
-    </Text>
+    <Box flexDirection="column">
+      {suggestions.length > 0 && (
+        <Box marginBottom={1}>
+          <Autocomplete suggestions={suggestions} selectedIndex={selectedIndex} />
+        </Box>
+      )}
+      {display.length > 0 ? (
+        <Text>
+          {display}
+          <Text inverse> </Text>
+        </Text>
+      ) : placeholder.length === 0 ? (
+        <Text>
+          <Text inverse> </Text>
+        </Text>
+      ) : (
+        <Text>
+          <Text inverse>{placeholder.slice(0, 1)}</Text>
+          <Text dimColor>{placeholder.slice(1)}</Text>
+        </Text>
+      )}
+    </Box>
   );
 }

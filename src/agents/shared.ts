@@ -12,10 +12,14 @@ export const DEFAULT_MAX_RETRIES = 3;
 export const DEFAULT_RETRY_BASE_DELAY_MS = 1000;
 
 export interface RunAgentCommandOptions {
+  cwd?: string;
+  signal?: AbortSignal;
   agent: AgentName;
   command: string;
   args: string[];
   prompt: string;
+  /** Prompt via stdin para CLIs que suportam entrada sem limite de argv. */
+  input?: string;
   timeoutMs?: number;
   /**
    * Chamado com cada pedaço de stdout assim que o processo escreve, antes
@@ -52,6 +56,7 @@ export async function runAgentCommand(options: RunAgentCommandOptions): Promise<
   const retries: AgentRetryAttempt[] = [];
 
   for (let attempt = 1; ; attempt++) {
+    if (options.signal?.aborted) throw new AgentError(options.agent, "cancelled", "Execução cancelada", undefined, retries);
     try {
       const result = await attemptOnce(attemptOptions);
       return retries.length > 0 ? { ...result, retries } : result;
@@ -93,7 +98,13 @@ async function attemptOnce(options: AttemptOnceOptions): Promise<AgentRunResult>
 
   let result: Awaited<ReturnType<typeof execa>>;
   try {
-    const subprocess = execa(command, args, { timeout: timeoutMs, reject: false });
+    const subprocess = execa(command, args, {
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+      ...(options.signal === undefined ? {} : { cancelSignal: options.signal }),
+      timeout: timeoutMs,
+      reject: false,
+      ...(options.input === undefined ? {} : { input: options.input }),
+    });
     if (onChunk) {
       subprocess.stdout?.on("data", (chunk: Buffer | string) => {
         onChunk(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
@@ -114,6 +125,10 @@ async function attemptOnce(options: AttemptOnceOptions): Promise<AgentRunResult>
 
   const finishedAt = new Date().toISOString();
   const durationMs = Date.now() - start;
+
+  if (result.isCanceled || options.signal?.aborted) {
+    throw new AgentError(agent, "cancelled", `"${command}" foi cancelado`, result);
+  }
 
   if (result.timedOut) {
     throw new AgentError(

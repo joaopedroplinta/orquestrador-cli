@@ -1,11 +1,17 @@
 import { randomUUID } from "node:crypto";
+import { basename } from "node:path";
 import { Box, Static, Text, useApp } from "ink";
 import Spinner from "ink-spinner";
 import { Fragment, useCallback, useEffect, useState } from "react";
-import { AGENT_REGISTRY } from "../agents/registry.js";
+import { AGENT_REGISTRY, isAgentName } from "../agents/registry.js";
 import { runPipeline, runPipelines } from "../orchestrator/pipeline.js";
 import { parseTaskAgentPrefix, planTask } from "../orchestrator/router.js";
+import { runTeam, type TeamState } from "../team/coordinator.js";
+import { formatTeamEvent } from "../team/presentation.js";
+import { formatUsdCost, totalCostUsd, usageLine } from "../reporting.js";
+import { computeSessionStats, exportSessionToFile } from "../sessionStats.js";
 import { listRuns } from "../storage/history.js";
+import { getGitBranch, getSystemStatus, type SystemStatus } from "../systemStatus.js";
 import {
   AgentError,
   PipelineCancelledError,
@@ -14,10 +20,18 @@ import {
   type AgentRunResult,
   type RoutingStrategy,
 } from "../types.js";
-import { applyModeCommand, INITIAL_MODE_STATE, parseInput, type ModeState } from "./commands.js";
-import { MascotBanner, MascotSpinner } from "./Mascot.js";
-import { mascotFaceFor, type MascotOutcome } from "./mascot.js";
+import { agentColor } from "./agentColors.js";
+import {
+  applyModeCommand,
+  INITIAL_MODE_STATE,
+  parseInput,
+  SLASH_COMMANDS,
+  type ModeState,
+} from "./commands.js";
+import OutputFormatter from "./OutputFormatter.js";
 import PromptInput from "./PromptInput.js";
+import StepCard from "./StepCard.js";
+import TeamCard from "./TeamCard.js";
 
 /** Tarefas separadas por ";" numa linha só ganham essa marca pra mostrar "Tarefa i/N" no transcript. */
 interface BatchTag {
@@ -26,12 +40,17 @@ interface BatchTag {
 }
 
 type TranscriptEntry =
-  | { kind: "banner"; id: string; mascotEnabled: boolean }
+  | { kind: "banner"; id: string }
   | { kind: "task"; id: string; text: string; agents: AgentName[]; batch?: BatchTag }
-  | { kind: "result"; id: string; steps: AgentRunResult[]; batch?: BatchTag; mascotFace?: string }
-  | { kind: "error"; id: string; message: string; batch?: BatchTag; mascotFace?: string }
-  | { kind: "cancelled"; id: string; message: string; mascotFace?: string }
+  | { kind: "team-task"; id: string; text: string }
+  | { kind: "team-result"; id: string; state: TeamState }
+  | { kind: "result"; id: string; steps: AgentRunResult[]; batch?: BatchTag }
+  | { kind: "error"; id: string; message: string; batch?: BatchTag }
+  | { kind: "cancelled"; id: string; message: string }
   | { kind: "info"; id: string; text: string }
+  | { kind: "help"; id: string }
+  | { kind: "status-card"; id: string; status: SystemStatus }
+  | { kind: "summary-card"; id: string }
   | {
       kind: "retry";
       id: string;
@@ -59,16 +78,10 @@ interface LiveTask {
   streamingOutput: string;
 }
 
-// Mapa em vez de ternário: um agente novo sem entrada aqui cai no fallback
-// neutro em vez de herdar silenciosamente a cor de outro agente qualquer —
-// ver "Adicionando um novo agente" no CLAUDE.md.
-const AGENT_COLORS: Partial<Record<AgentName, string>> = {
-  claude: "magenta",
-  antigravity: "blue",
-};
-
-function agentColor(agent: AgentName): string {
-  return AGENT_COLORS[agent] ?? "white";
+interface LiveTeam {
+  task: string;
+  id?: string;
+  events: string[];
 }
 
 function batchPrefix(batch: BatchTag | undefined): string {
@@ -76,28 +89,16 @@ function batchPrefix(batch: BatchTag | undefined): string {
 }
 
 // Prévia de rota mostrada assim que a tarefa é digitada, antes do pipeline
-// resolver de verdade — precisa refletir a mesma prioridade de runPipeline()
-// (forceAgent global > prefixo "claude:"/"antigravity:" por tarefa >
-// roteamento por keyword), senão mostraria uma rota diferente da que
-// realmente vai rodar. Prefixo inválido não tenta adivinhar nada (o erro
-// aparece assim que a tarefa rodar de verdade).
+// resolver de verdade — precisa refletir a mesma prioridade de runPipeline().
 function previewAgents(task: string, forcedAgent: AgentName | null): AgentName[] {
   if (forcedAgent) return [forcedAgent];
   const prefix = parseTaskAgentPrefix(task);
   if (prefix.invalidAgentName) return [];
+  if (prefix.agents) return prefix.agents;
   if (prefix.agent) return [prefix.agent];
   return planTask(prefix.text).map((step) => step.agent);
 }
 
-// undefined quando o mascote está desligado — os "case" de renderização só
-// prependem a carinha quando ela existe, então não precisa de um segundo
-// controle de "mostrar ou não" espalhado pela tela.
-function mascotFaceIfEnabled(outcome: MascotOutcome, mascotEnabled: boolean): string | undefined {
-  return mascotEnabled ? mascotFaceFor(outcome) : undefined;
-}
-
-// Reaproveitado pelo modo de uma tarefa só e pelo modo em lote — sempre a
-// mesma leitura de erro (cancelamento vs. erro de agente vs. genérico).
 function describeError(error: unknown): { kind: "error" | "cancelled"; message: string } {
   if (error instanceof PipelineCancelledError) {
     return { kind: "cancelled", message: error.message };
@@ -108,54 +109,298 @@ function describeError(error: unknown): { kind: "error" | "cancelled"; message: 
   return { kind: "error", message: error instanceof Error ? error.message : String(error) };
 }
 
-function Banner({ mascotEnabled }: { mascotEnabled: boolean }) {
+// ─── Componentes de UI ────────────────────────────────────────────────────────
+
+function Banner() {
   return (
     <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1} marginBottom={1}>
-      {mascotEnabled && <MascotBanner />}
-      <Text bold color="cyan">
-        ⚡ orquestrador
-      </Text>
-      <Text dimColor>Orquestra Claude Code + Antigravity numa mesma tarefa.</Text>
+      <Box justifyContent="space-between">
+        <Text bold color="cyan">⚡ orquestrador</Text>
+        <Text color="green">● 3 agentes prontos</Text>
+      </Box>
+      <Text dimColor>Planeje, execute e revise tarefas no mesmo projeto.</Text>
       <Text dimColor>
-        Digite uma tarefa e aperte Enter. Separe por <Text color="green">;</Text> pra rodar várias em paralelo.
-      </Text>
-      <Text dimColor>
-        <Text color="green">/history</Text> · <Text color="green">/agent claude|antigravity|auto</Text> ·{" "}
-        <Text color="green">/auto</Text> · <Text color="green">/routing keyword|classify</Text> ·{" "}
-        <Text color="green">/mascot</Text> · <Text color="green">/exit</Text> · Ctrl+C
+        <Text color="green">tarefa</Text> executar · <Text color="green">;</Text> paralelo · <Text color="green">/team</Text> equipe · <Text color="green">/help</Text> comandos
       </Text>
     </Box>
   );
 }
 
-function StatusLine({ mode }: { mode: ModeState }) {
+function ComposerHint({ draft, mode }: { draft: string; mode: ModeState }) {
+  const trimmed = draft.trim();
+  if (!trimmed) {
+    return <Text dimColor>Ex.: implementar login com testes · ou /team implementar login completo</Text>;
+  }
+  if (trimmed.startsWith("/")) {
+    return <Text dimColor>Tab ou Enter completa · ↑/↓ escolhe um comando · Enter executa</Text>;
+  }
+
+  const tasks = trimmed.split(";").map((task) => task.trim()).filter(Boolean);
+  if (tasks.length > 1) {
+    return <Text color="cyan">↗ {tasks.length} tarefas serão executadas em paralelo</Text>;
+  }
+  const prefix = parseTaskAgentPrefix(trimmed);
+  if (prefix.invalidAgentName) {
+    return <Text color="red">⚠ Agente "{prefix.invalidAgentName}" não existe</Text>;
+  }
+  const agents = previewAgents(trimmed, mode.forcedAgent);
+  if (!agents.length) {
+    return <Text dimColor>Rota ainda ambígua · você poderá escolher um agente</Text>;
+  }
   return (
-    <Box marginTop={1}>
-      <Text dimColor>agente: </Text>
-      {mode.forcedAgent ? (
-        <Text color={agentColor(mode.forcedAgent)} bold>
-          {mode.forcedAgent} (forçado)
+    <Text dimColor>
+      Rota sugerida: {" "}
+      {agents.map((agent, index) => (
+        <Fragment key={`${agent}-${index}`}>
+          {index > 0 && " → "}
+          <Text color={agentColor(agent)}>{agent}</Text>
+        </Fragment>
+      ))}
+    </Text>
+  );
+}
+
+function HelpView() {
+  const categories = ["Agente e Roteamento", "Sessão e Utilidades", "Ajuda e Diagnóstico"] as const;
+
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} marginY={1}>
+      <Text bold color="cyan">
+        📖 Comandos do Orquestrador
+      </Text>
+      <Text dimColor>Todos os comandos iniciam com barra (/). Tab completa, ↑/↓ navega o histórico.</Text>
+
+      {categories.map((cat) => (
+        <Box key={cat} flexDirection="column" marginTop={1}>
+          <Text bold color="yellow">
+            {cat}:
+          </Text>
+          {SLASH_COMMANDS.filter((cmd) => cmd.category === cat && !cmd.hidden).map((cmd) => (
+            <Box key={cmd.name} paddingLeft={2}>
+              <Text bold color="green">
+                {cmd.synopsis.padEnd(32)}
+              </Text>
+              <Text dimColor>{cmd.description}</Text>
+            </Box>
+          ))}
+        </Box>
+      ))}
+
+      <Box marginTop={1} flexDirection="column">
+        <Text bold color="yellow">
+          Dicas:
         </Text>
-      ) : (
-        <Text dimColor>automático</Text>
-      )}
-      <Text dimColor>{"   roteamento: "}</Text>
-      <Text bold={mode.routing === "classify"}>{mode.routing}</Text>
-      <Text dimColor>{"   auto: "}</Text>
-      <Text color={mode.autoMode ? "green" : undefined} dimColor={!mode.autoMode} bold={mode.autoMode}>
-        {mode.autoMode ? "ligado" : "desligado"}
-      </Text>
-      <Text dimColor>{"   mascote: "}</Text>
-      <Text color={mode.mascotEnabled ? "green" : undefined} dimColor={!mode.mascotEnabled}>
-        {mode.mascotEnabled ? "ligado" : "desligado"}
-      </Text>
+        <Text dimColor>
+          {"  • "}Separe tarefas com <Text color="green">;</Text> para execução concorrente (ex:{" "}
+          <Text color="white">pesquisar auth ; criar testes</Text>)
+        </Text>
+        <Text dimColor>
+          {"  • "}Use prefixos <Text color="magenta">claude:</Text>, <Text color="blue">antigravity:</Text> ou <Text color="green">codex:</Text> para
+          forçar um agente específico por tarefa
+        </Text>
+        <Text dimColor>
+          {"  • "}Encadeie agentes: antigravity&gt;codex&gt;claude: pesquisar, implementar e revisar
+        </Text>
+        <Text dimColor>
+          {"  • "}Use <Text color="green">/team implementar login completo</Text> para agentes coordenados em worktrees
+        </Text>
+        <Text dimColor>
+          {"  • "}<Text color="green">/export json</Text> exporta todas as execuções para um arquivo JSON
+        </Text>
+      </Box>
     </Box>
   );
 }
+
+function StatusCardView({ status }: { status: SystemStatus }) {
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="green" paddingX={1} marginY={1}>
+      <Text bold color="green">
+        🩺 Diagnóstico do Ambiente
+      </Text>
+
+      <Box marginTop={1} flexDirection="column">
+        <Box>
+          <Text bold>Projeto: </Text>
+          <Text color="cyan">{status.projectName}</Text>
+          <Text dimColor> ({status.cwd})</Text>
+        </Box>
+        <Box>
+          <Text bold>Git Branch: </Text>
+          {status.gitBranch ? (
+            <Text color="green">⎇ {status.gitBranch}</Text>
+          ) : (
+            <Text dimColor>Não é um repositório git</Text>
+          )}
+        </Box>
+        <Box>
+          <Text bold>Node.js: </Text>
+          <Text color="cyan">{status.nodeVersion}</Text>
+        </Box>
+        <Box>
+          <Text bold>Histórico (SQLite): </Text>
+          <Text color="cyan">{status.historyRunsCount} execuções registradas</Text>
+        </Box>
+      </Box>
+
+      <Box marginTop={1} flexDirection="column">
+        <Text bold color="yellow">
+          Ferramentas de IA:
+        </Text>
+        <Box paddingLeft={2}>
+          <Text bold color="magenta">
+            Claude Code (claude):{" "}
+          </Text>
+          {status.claude.installed ? (
+            <Text color="green">✔ {status.claude.version}</Text>
+          ) : (
+            <Text color="red">✖ Não encontrado no PATH ({status.claude.error})</Text>
+          )}
+        </Box>
+        <Box paddingLeft={2}>
+          <Text bold color="blue">
+            Antigravity (agy):{" "}
+          </Text>
+          {status.antigravity.installed ? (
+            <Text color="green">✔ {status.antigravity.version}</Text>
+          ) : (
+            <Text color="red">✖ Não encontrado no PATH ({status.antigravity.error})</Text>
+          )}
+        </Box>
+        <Box paddingLeft={2}>
+          <Text bold color="green">Codex (codex): </Text>
+          {status.codex.installed ? (
+            <Text color="green">✔ {status.codex.version}</Text>
+          ) : (
+            <Text color="red">✖ Não encontrado no PATH ({status.codex.error})</Text>
+          )}
+        </Box>
+      </Box>
+    </Box>
+  );
+}
+
+function SummaryCardView() {
+  const runs = listRuns(100);
+
+  if (runs.length === 0) {
+    return (
+      <Box marginY={1}>
+        <Text dimColor>📊 Nenhuma execução registrada nesta sessão.</Text>
+      </Box>
+    );
+  }
+
+  const stats = computeSessionStats(runs);
+  const totalSec = (stats.totalDurationMs / 1000).toFixed(1);
+  const costText = stats.totalCostUsd > 0 ? formatUsdCost(stats.totalCostUsd) : "—";
+
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1} marginY={1}>
+      <Text bold color="yellow">
+        📊 Resumo da Sessão
+      </Text>
+
+      <Box marginTop={1} flexDirection="column">
+        <Box>
+          <Text bold>Execuções: </Text>
+          <Text color="cyan">{stats.totalRuns}</Text>
+          <Text dimColor>   Etapas: </Text>
+          <Text color="cyan">{stats.totalSteps}</Text>
+          <Text dimColor>   Tempo total: </Text>
+          <Text color="cyan">{totalSec}s</Text>
+          <Text dimColor>   Custo estimado: </Text>
+          <Text color={stats.totalCostUsd > 0 ? "green" : "white"}>{costText}</Text>
+        </Box>
+      </Box>
+
+      <Box marginTop={1} flexDirection="column">
+        <Text bold color="yellow">
+          Por agente:
+        </Text>
+        {(Object.entries(stats.agentBreakdown) as [AgentName, { steps: number; durationMs: number }][])
+          .filter(([, data]) => data.steps > 0)
+          .map(([agent, data]) => {
+            const allSteps = runs.flatMap((r) => r.steps).filter((s) => s.agent === agent);
+            const costForAgent = totalCostUsd(allSteps);
+            return (
+              <Box key={agent} paddingLeft={2}>
+                <Text bold color={agentColor(agent)}>
+                  {agent.padEnd(14)}
+                </Text>
+                <Text dimColor>{data.steps} etapas</Text>
+                <Text dimColor>   {(data.durationMs / 1000).toFixed(1)}s</Text>
+                {costForAgent && (
+                  <Text dimColor>   {formatUsdCost(costForAgent.total)}</Text>
+                )}
+              </Box>
+            );
+          })}
+      </Box>
+
+      <Box marginTop={1}>
+        <Text dimColor>Use </Text>
+        <Text color="green">/export</Text>
+        <Text dimColor> para salvar um relatório Markdown ou </Text>
+        <Text color="green">/export json</Text>
+        <Text dimColor> para JSON.</Text>
+      </Box>
+    </Box>
+  );
+}
+
+function StatusLine({
+  mode,
+  projectName,
+  gitBranch,
+}: {
+  mode: ModeState;
+  projectName: string;
+  gitBranch: string | null;
+}) {
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      <Box>
+        <Text dimColor>📁 </Text>
+        <Text bold color="cyan">
+          {projectName}
+        </Text>
+        {gitBranch && (
+          <Text dimColor>
+            {" "}(<Text color="green">⎇ {gitBranch}</Text>)
+          </Text>
+        )}
+      </Box>
+      <Box>
+        <Text dimColor>{"agente: "}</Text>
+        {mode.forcedAgent ? (
+          <Text color={agentColor(mode.forcedAgent)} bold>
+            {mode.forcedAgent} (forçado)
+          </Text>
+        ) : (
+          <Text dimColor>automático</Text>
+        )}
+        <Text dimColor>{"   roteamento: "}</Text>
+        <Text bold={mode.routing === "classify"}>{mode.routing}</Text>
+        <Text dimColor>{"   auto: "}</Text>
+        <Text color={mode.autoMode ? "green" : undefined} dimColor={!mode.autoMode} bold={mode.autoMode}>
+          {mode.autoMode ? "ligado" : "desligado"}
+        </Text>
+      </Box>
+      <Box>
+        <Text dimColor>
+          <Text color="gray">Tab</Text> completar · <Text color="gray">↑/↓</Text> histórico ·{" "}
+          <Text color="gray">/help</Text> comandos · <Text color="gray">/status</Text> diagnóstico ·{" "}
+          <Text color="gray">/summary</Text> resumo · <Text color="gray">Ctrl+C</Text> sair
+        </Text>
+      </Box>
+    </Box>
+  );
+}
+
+// ─── Componente principal App ─────────────────────────────────────────────────
 
 export interface AppProps {
-  /** Estado inicial do mascote — seedado por --no-mascot ou pelo .orquestradorrc do projeto (padrão: ligado). */
-  initialMascotEnabled?: boolean;
   /** Seed de ModeState.forcedAgent — vem do campo "agent" do .orquestradorrc, se houver. */
   initialForcedAgent?: AgentName;
   /** Seed de ModeState.routing — vem do campo "routing" do .orquestradorrc, se houver. */
@@ -165,14 +410,13 @@ export interface AppProps {
   /**
    * Repassados direto em todo runPipeline/runPipelines da sessão — vêm do
    * .orquestradorrc do projeto. Não fazem parte de ModeState (sem slash
-   * command pra mudar em runtime, diferente de agente/roteamento/auto/mascote).
+   * command pra mudar em runtime, diferente de agente/roteamento/auto).
    */
   maxRetries?: number;
   retryBaseDelayMs?: number;
 }
 
 export default function App({
-  initialMascotEnabled = true,
   initialForcedAgent,
   initialRouting,
   initialAutoMode,
@@ -180,22 +424,27 @@ export default function App({
   retryBaseDelayMs,
 }: AppProps = {}) {
   const { exit } = useApp();
-  const [transcript, setTranscript] = useState<TranscriptEntry[]>([
-    { kind: "banner", id: randomUUID(), mascotEnabled: initialMascotEnabled },
-  ]);
+  const [transcript, setTranscript] = useState<TranscriptEntry[]>([{ kind: "banner", id: randomUUID() }]);
   const [status, setStatus] = useState<Status>("idle");
   const [runningTask, setRunningTask] = useState<string | null>(null);
   const [pendingAgentPrompt, setPendingAgentPrompt] = useState<PendingAgentPrompt | undefined>();
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [projectName] = useState(() => basename(process.cwd()));
+  const [gitBranch, setGitBranch] = useState<string | null>(null);
   const [mode, setMode] = useState<ModeState>({
     forcedAgent: initialForcedAgent ?? INITIAL_MODE_STATE.forcedAgent,
     routing: initialRouting ?? INITIAL_MODE_STATE.routing,
     autoMode: initialAutoMode ?? INITIAL_MODE_STATE.autoMode,
-    mascotEnabled: initialMascotEnabled,
   });
   const [streamingAgent, setStreamingAgent] = useState<AgentName | null>(null);
   const [streamingOutput, setStreamingOutput] = useState("");
   const [liveTasks, setLiveTasks] = useState<LiveTask[] | null>(null);
+  const [liveTeam, setLiveTeam] = useState<LiveTeam | null>(null);
+  const [draft, setDraft] = useState("");
+
+  useEffect(() => {
+    void getGitBranch().then(setGitBranch);
+  }, []);
 
   useEffect(() => {
     if (status !== "running") {
@@ -271,7 +520,6 @@ export default function App({
               kind: "result",
               id: randomUUID(),
               steps: [stepResult],
-              mascotFace: mascotFaceIfEnabled("success", mode.mascotEnabled),
             });
           },
           resolveAmbiguousAgent: (ambiguousTask) =>
@@ -287,14 +535,12 @@ export default function App({
             kind: "cancelled",
             id: randomUUID(),
             message: described.message,
-            mascotFace: mascotFaceIfEnabled("cancelled", mode.mascotEnabled),
           });
         } else {
           addEntry({
             kind: "error",
             id: randomUUID(),
             message: described.message,
-            mascotFace: mascotFaceIfEnabled("error", mode.mascotEnabled),
           });
         }
       } finally {
@@ -361,7 +607,6 @@ export default function App({
               id: randomUUID(),
               steps: [stepResult],
               batch: { index: index + 1, total },
-              mascotFace: mascotFaceIfEnabled("success", mode.mascotEnabled),
             });
           },
         });
@@ -374,7 +619,6 @@ export default function App({
               kind: "cancelled",
               id: randomUUID(),
               message: described.message,
-              mascotFace: mascotFaceIfEnabled("cancelled", mode.mascotEnabled),
             });
           } else {
             addEntry({
@@ -382,7 +626,6 @@ export default function App({
               id: randomUUID(),
               message: described.message,
               batch: { index: i + 1, total },
-              mascotFace: mascotFaceIfEnabled("error", mode.mascotEnabled),
             });
           }
         });
@@ -394,6 +637,41 @@ export default function App({
     [addEntry, mode, maxRetries, retryBaseDelayMs],
   );
 
+  const runTeamFromTui = useCallback(
+    async (task: string) => {
+      setStatus("running");
+      setRunningTask(task);
+      setLiveTeam({ task, events: ["Preparando equipe e verificando o repositório Git..."] });
+      addEntry({ kind: "team-task", id: randomUUID(), text: task });
+
+      try {
+        const result = await runTeam({
+          task,
+          onEvent: (event) => {
+            const formatted = formatTeamEvent(event);
+            const id = event.match(/^Equipe ([a-f0-9-]{36}):/)?.[1];
+            setLiveTeam((previous) => previous
+              ? { ...previous, id: id ?? previous.id, events: [...previous.events, formatted].slice(-8) }
+              : previous,
+            );
+          },
+        });
+        addEntry({ kind: "team-result", id: randomUUID(), state: result });
+      } catch (error) {
+        addEntry({
+          kind: "error",
+          id: randomUUID(),
+          message: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        setStatus("idle");
+        setRunningTask(null);
+        setLiveTeam(null);
+      }
+    },
+    [addEntry],
+  );
+
   const handleSubmit = useCallback(
     (value: string) => {
       const trimmed = value.trim();
@@ -401,7 +679,7 @@ export default function App({
 
       if (status === "asking-agent" && pendingAgentPrompt) {
         const answer = trimmed.toLowerCase();
-        if (answer === "claude" || answer === "antigravity") {
+        if (isAgentName(answer)) {
           pendingAgentPrompt.resolve(answer);
           setPendingAgentPrompt(undefined);
           setStatus("running");
@@ -416,7 +694,7 @@ export default function App({
         addEntry({
           kind: "info",
           id: randomUUID(),
-          text: 'Opção inválida. Digite "claude", "antigravity" ou "cancelar".',
+          text: 'Opção inválida. Digite "claude", "antigravity", "codex" ou "cancelar".',
         });
         return;
       }
@@ -431,6 +709,42 @@ export default function App({
           return;
         case "history":
           showHistory();
+          return;
+        case "help":
+          addEntry({ kind: "help", id: randomUUID() });
+          return;
+        case "status":
+          void (async () => {
+            const sysStatus = await getSystemStatus();
+            addEntry({ kind: "status-card", id: randomUUID(), status: sysStatus });
+          })();
+          return;
+        case "summary":
+          addEntry({ kind: "summary-card", id: randomUUID() });
+          return;
+        case "export": {
+          const format = parsed.format;
+          try {
+            const { filepath, count } = exportSessionToFile(listRuns(100), format);
+            addEntry({
+              kind: "info",
+              id: randomUUID(),
+              text: `✔ ${count} execuções exportadas para: ${filepath}`,
+            });
+          } catch (err) {
+            addEntry({
+              kind: "error",
+              id: randomUUID(),
+              message: `Erro ao exportar: ${err instanceof Error ? err.message : String(err)}`,
+            });
+          }
+          return;
+        }
+        case "clear":
+          if (process.stdout.isTTY) {
+            process.stdout.write("\x1Bc");
+          }
+          addEntry({ kind: "info", id: randomUUID(), text: "Histórico visual limpo." });
           return;
         case "set-agent": {
           const nextMode = applyModeCommand(mode, parsed);
@@ -467,16 +781,6 @@ export default function App({
           });
           return;
         }
-        case "toggle-mascot": {
-          const nextMode = applyModeCommand(mode, parsed);
-          setMode(nextMode);
-          addEntry({
-            kind: "info",
-            id: randomUUID(),
-            text: `Mascote ${nextMode.mascotEnabled ? "ligado" : "desligado"}.`,
-          });
-          return;
-        }
         case "error":
           addEntry({ kind: "error", id: randomUUID(), message: parsed.message });
           return;
@@ -486,21 +790,24 @@ export default function App({
         case "tasks":
           void runTasksInParallel(parsed.texts);
           return;
+        case "team":
+          void runTeamFromTui(parsed.task);
+          return;
       }
     },
-    [status, pendingAgentPrompt, mode, addEntry, exit, showHistory, runTask, runTasksInParallel],
+    [status, pendingAgentPrompt, mode, addEntry, exit, showHistory, runTask, runTasksInParallel, runTeamFromTui],
   );
 
   return (
     <Box flexDirection="column">
       <Static items={transcript}>{(entry) => <TranscriptEntryView key={entry.id} entry={entry} />}</Static>
 
-      <StatusLine mode={mode} />
+      <StatusLine mode={mode} projectName={projectName} gitBranch={gitBranch} />
 
       {status === "running" && liveTasks && (
         <Box flexDirection="column" marginTop={1}>
           <Text dimColor>
-            {mode.mascotEnabled ? <MascotSpinner /> : <Spinner type="dots" />} Rodando {liveTasks.length} tarefas em
+            <Spinner type="dots" /> Rodando {liveTasks.length} tarefas em
             paralelo... <Text dimColor>({elapsedSeconds}s)</Text>
           </Text>
           {liveTasks.map((t) => (
@@ -523,10 +830,21 @@ export default function App({
         </Box>
       )}
 
-      {status === "running" && !liveTasks && (
+      {status === "running" && liveTeam && (
+        <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor="cyan" paddingX={1}>
+          <Text color="cyan">
+            <Spinner type="dots" /> Equipe trabalhando <Text dimColor>({elapsedSeconds}s)</Text>
+          </Text>
+          <Text>{liveTeam.task}</Text>
+          {liveTeam.events.map((event, index) => <Text key={`${index}-${event}`} dimColor>{event}</Text>)}
+          {liveTeam.id && <Text dimColor>Em outro terminal: orquestrador team status {liveTeam.id} --messages</Text>}
+        </Box>
+      )}
+
+      {status === "running" && !liveTasks && !liveTeam && (
         <Box flexDirection="column" marginTop={1}>
           <Box>
-            <Text color="cyan">{mode.mascotEnabled ? <MascotSpinner /> : <Spinner type="dots" />}</Text>
+            <Text color="cyan"><Spinner type="dots" /></Text>
             <Text>
               {" "}
               Rodando: {runningTask} <Text dimColor>({elapsedSeconds}s)</Text>
@@ -538,7 +856,7 @@ export default function App({
                 [{streamingAgent}]
                 {!AGENT_REGISTRY[streamingAgent].streamsIncrementally && <Text dimColor> (simulando…)</Text>}
               </Text>
-              <Text>{streamingOutput}</Text>
+              <OutputFormatter text={streamingOutput} />
             </Box>
           )}
         </Box>
@@ -552,21 +870,35 @@ export default function App({
       )}
 
       <Box marginTop={1} borderStyle="round" borderColor={status === "running" ? "gray" : "cyan"} paddingX={1}>
-        <Text color="green">{status === "asking-agent" ? "> " : "❯ "}</Text>
-        <PromptInput
-          onSubmit={handleSubmit}
-          disabled={status === "running"}
-          placeholder={status === "asking-agent" ? "claude | antigravity | cancelar" : "digite uma tarefa..."}
-        />
+        <Box flexDirection="column">
+          <Box>
+            <Text color="green">{status === "asking-agent" ? "> " : "❯ "}</Text>
+            <PromptInput
+              onSubmit={handleSubmit}
+              onChange={setDraft}
+              disabled={status === "running"}
+              placeholder={status === "asking-agent" ? "claude | antigravity | codex | cancelar" : "descreva uma tarefa..."}
+            />
+          </Box>
+          {status === "idle" && <ComposerHint draft={draft} mode={mode} />}
+        </Box>
       </Box>
     </Box>
   );
 }
 
+// ─── Renderização de entradas do transcript ───────────────────────────────────
+
 function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
   switch (entry.kind) {
     case "banner":
-      return <Banner mascotEnabled={entry.mascotEnabled} />;
+      return <Banner />;
+    case "help":
+      return <HelpView />;
+    case "status-card":
+      return <StatusCardView status={entry.status} />;
+    case "summary-card":
+      return <SummaryCardView />;
     case "task":
       return (
         <Box marginTop={1} flexDirection="column">
@@ -590,17 +922,20 @@ function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
           )}
         </Box>
       );
+    case "team-task":
+      return (
+        <Box marginTop={1} flexDirection="column">
+          <Text color="cyan" bold>☍ equipe</Text>
+          <Text>{entry.text}</Text>
+        </Box>
+      );
+    case "team-result":
+      return <TeamCard state={entry.state} />;
     case "result":
       return (
         <Box flexDirection="column">
           {entry.steps.map((step, i) => (
-            <Box key={i} flexDirection="column" marginTop={1}>
-              <Text bold color={agentColor(step.agent)}>
-                {entry.mascotFace ? `${entry.mascotFace} ` : ""}
-                {batchPrefix(entry.batch)}[{step.agent}] ({step.durationMs}ms)
-              </Text>
-              <Text>{step.output}</Text>
-            </Box>
+            <StepCard key={i} step={step} batchPrefix={batchPrefix(entry.batch)} />
           ))}
         </Box>
       );
@@ -608,7 +943,6 @@ function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
       return (
         <Box marginTop={1}>
           <Text color="red">
-            {entry.mascotFace ? `${entry.mascotFace} ` : ""}
             {batchPrefix(entry.batch)}
             {entry.message}
           </Text>
@@ -617,10 +951,7 @@ function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
     case "cancelled":
       return (
         <Box marginTop={1}>
-          <Text color="yellow">
-            {entry.mascotFace ? `${entry.mascotFace} ` : ""}
-            {entry.message}
-          </Text>
+          <Text color="yellow">{entry.message}</Text>
         </Box>
       );
     case "info":

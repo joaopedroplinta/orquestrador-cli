@@ -125,3 +125,13 @@ describe("classifyTaskWithClaude", () => {
     await expect(classifyTaskWithClaude(task)).resolves.toBeNull();
   });
 });
+
+describe("prefixos de colaboração", () => {
+  it("reconhece Codex e sequências com espaços, caixa e agentes repetidos", () => {
+    expect(parseTaskAgentPrefix("codex: implementar")).toEqual({ agent: "codex", text: "implementar" });
+    expect(parseTaskAgentPrefix("Claude > CODEX > claude: revisar")).toEqual({ agents: ["claude", "codex", "claude"], text: "revisar" });
+  });
+  it.each(["codex>>claude: implementar", "codex>: implementar", "codex>foo: implementar"])("rejeita sequência inválida: %s", (task) => {
+    expect(parseTaskAgentPrefix(task).invalidAgentName).toBeTruthy();
+  });
+});

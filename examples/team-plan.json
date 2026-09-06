@@ -1,0 +1,22 @@
+{
+  "tasks": [
+    {
+      "id": "backend",
+      "agent": "codex",
+      "task": "Implemente o backend da funcionalidade solicitada, com testes. Combine os contratos HTTP com frontend por mensagens antes de implementá-los.",
+      "dependsOn": []
+    },
+    {
+      "id": "frontend",
+      "agent": "claude",
+      "task": "Implemente o frontend da funcionalidade solicitada, com testes. Combine os contratos HTTP com backend por mensagens antes de implementá-los.",
+      "dependsOn": []
+    },
+    {
+      "id": "review",
+      "agent": "codex",
+      "task": "Revise backend e frontend integrados. Execute os testes, verifique os contratos acordados, corrija inconsistências e registre as verificações e pendências.",
+      "dependsOn": ["backend", "frontend"]
+    }
+  ]
+}

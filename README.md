@@ -4,21 +4,163 @@
 [![Node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](package.json)
 [![License: MIT](https://img.shields.io/github/license/joaopedroplinta/orquestrador-cli)](LICENSE)
 
-CLI em Node.js/TypeScript que orquestra duas ferramentas de IA agentic —
-**Claude Code** (`claude`) e **Antigravity CLI** (`agy`) — numa mesma tarefa.
+CLI em Node.js/TypeScript que orquestra três ferramentas de IA agentic —
+**Claude Code** (`claude`), **Antigravity CLI** (`agy`) e **Codex CLI** (`codex`) — numa mesma tarefa.
 Em vez de você decidir na mão qual ferramenta usar pra pesquisar algo e qual
 usar pra implementar, o orquestrador decide isso, dispara os comandos via
 shell, repassa o resultado de uma etapa como contexto de entrada da próxima,
 e guarda tudo num histórico consultável.
+
+## Equipes paralelas com worktrees e mensagens
+
+O modo `team` coordena uma tarefa comum, com subtarefas independentes em paralelo
+e dependências sequenciais. Exige um repositório Git **limpo, com pelo menos um
+commit**: todos partem do mesmo commit. Salve suas alterações em commit antes de
+iniciar. Somente os agentes escolhidos precisam estar instalados e autenticados.
+
+```bash
+npm run build
+
+# Claude planeja; Claude e Codex executam subtarefas em paralelo.
+node dist/cli.js team run "implementar login no backend e frontend, com testes" \
+ --agents claude,codex --planner claude --concurrency 2
+
+# Você define o plano e evita a chamada de planejamento.
+node dist/cli.js team run "implementar login" \
+ --plan examples/team-plan.json --agents claude,codex --concurrency 2
+```
+
+O arquivo de exemplo contém duas tarefas paralelas (`backend` e `frontend`) e
+uma revisão que depende de ambas. Ajuste as descrições ao projeto antes de usar.
+O plano segue este formato:
+
+```json
+{
+ "tasks": [
+   {"id":"backend","agent":"codex","task":"Implementar API","dependsOn":[]},
+   {"id":"frontend","agent":"claude","task":"Implementar interface","dependsOn":[]},
+   {"id":"review","agent":"codex","task":"Revisar e testar a integração","dependsOn":["backend","frontend"]}
+ ]
+}
+```
+
+O coordenador valida nomes, ids únicos e dependências, rejeitando ciclos antes
+da execução. São até 12 subtarefas e `--concurrency` limita quantas ficam ativas.
+Cada tarefa recebe uma branch e worktree próprias; `process.cwd()` global não é
+alterado. Quando as dependências terminam, seus commits são integrados na
+worktree da tarefa dependente e seus resumos entram no contexto do agente.
+
+**Mensagens durante a execução:** cada worktree recebe um utilitário local,
+que não exige instalar dependências:
+
+```bash
+node .orquestrador-team/mailbox.cjs send frontend "POST /login retorna token e user"
+node .orquestrador-team/mailbox.cjs inbox
+```
+
+As instruções pedem aos agentes que consultem a caixa ao iniciar, entre etapas,
+antes de mudar interfaces e antes de concluir. O coordenador entrega mensagens
+a cada 200 ms e guarda remetente, destinatário e texto no registro da equipe.
+`all` transmite para a equipe; `user` registra uma mensagem para você. Mensagens
+para tarefas ainda pendentes ficam na caixa até elas começarem. Em outro terminal:
+
+```bash
+node dist/cli.js team status <id-da-equipe> --messages
+node dist/cli.js team send <id-da-equipe> backend "O login deve aceitar email"
+```
+
+`team status` agora abre um painel compacto com as subtarefas, dependências,
+agentes, integração e erros. Use `--messages` para as últimas mensagens ou
+`--json` quando outro programa precisar ler o estado completo.
+
+**Entrega não significa leitura:** esse protocolo depende de o agente executar
+`inbox`. Ele não interrompe uma chamada do modelo, não reabre tarefas concluídas
+e não transfere arquivos por mensagem. Para depender de código, use `dependsOn`.
+Se um CLI pedir permissão para executar o utilitário, aplicam-se as permissões
+normais dele; o orquestrador não habilita bypass de permissões.
+
+**Integração:** o coordenador faz commits locais das alterações nas worktrees
+das tarefas e os une em uma branch `orquestrador/<id>/integration`. A branch e
+os arquivos do checkout original permanecem intactos. Ao finalizar, a CLI mostra
+o diretório da integração e comandos para revisar o diff e fazer merge depois
+de testar. Um conflito interrompe a integração e preserva os arquivos conflitantes
+nessa worktree. Uma tarefa que falha bloqueia suas dependentes; as independentes
+terminam e a integração é marcada como parcial. O modo não faz retry automático
+de tarefas que podem ter alterado arquivos.
+
+`--timeout 300000` é o limite padrão por chamada de agente (5 minutos). Ctrl+C
+cancela as chamadas ativas e impede novas tarefas; resultados e worktrees ficam
+preservados. Estado, respostas, uso reportado e mensagens ficam em
+`~/.orquestrador/teams/<id>/state.json`, consultáveis com `team status`, separados
+do histórico SQLite de `run`. Em término abrupto do processo, o último estado
+pode continuar marcado como ativo; ainda não há recuperação automática.
+
+Worktrees não recebem `node_modules`, arquivos ignorados ou credenciais do
+projeto original. A preparação de dependências deve estar na subtarefa quando
+necessária. A revisão/teste da integração é uma tarefa explícita do plano;
+sucesso dos processos não comprova por si só que o código está correto.
+Não há limpeza automática: depois de revisar/guardar os resultados, remova
+worktrees com `git worktree remove <caminho>` e branches com `git branch -d <branch>`.
+O comando `team` é usado no terminal; os comandos e lotes da TUI continuam com
+o comportamento anterior. Na TUI, abra `orquestrador` e digite:
+
+```text
+/team implementar login completo com backend, frontend e testes
+```
+
+A tela acompanha o planejamento, as subtarefas e a integração. A equipe usa os
+agentes padrão disponíveis; para escolher agentes, concorrência ou fornecer um
+plano JSON, use o comando `team run` no terminal.
+
+## Codex e colaboração entre agentes
+
+Depois de compilar (`npm run build`), você pode usar diretamente:
+
+```bash
+node dist/cli.js run "implementar testes para o login" --agent codex
+node dist/cli.js run "codex: revisar os arquivos alterados"
+node dist/cli.js run "antigravity>codex>claude: Antigravity pesquisa opções de autenticação; Codex implementa a melhor opção; Claude revisa código e testes"
+```
+
+Na TUI (`npm run dev`), use `/agent codex` para fixar o agente e `/agent auto`
+para voltar ao roteamento. O prefixo `antigravity>codex>claude:` também funciona
+na TUI. **Na TUI, separe as instruções com vírgulas**, pois `;` separa tarefas
+independentes. Exemplo:
+
+```text
+antigravity>codex>claude: Antigravity pesquisa autenticação, Codex implementa, Claude revisa
+```
+
+A sequência roda da esquerda para a direita no mesmo diretório. Cada etapa
+recebe a resposta da anterior, a tarefa original e sua posição na colaboração.
+O histórico guarda cada resposta e o vínculo entre etapas. É possível voltar
+a um agente (`claude>codex>claude:`). Uma falha interrompe a sequência.
+`--agent`, `/agent` ou `agent` no `.orquestradorrc` têm prioridade sobre o
+prefixo; remova o agente fixo para executar a sequência inteira.
+
+O Codex é chamado com `codex exec --json --sandbox workspace-write -`, com o
+prompt via stdin. O adaptador valida o JSONL, extrai a última mensagem do
+agente e registra tokens de entrada, saída e cache quando disponíveis. Não
+estima custo. A resposta aparece após o turno terminar, com a mesma revelação
+visual simulada usada para Claude; eventos internos não entram no handoff.
+A integração segue a [documentação oficial do modo não interativo do Codex](https://learn.chatgpt.com/docs/non-interactive-mode).
+
+`/status` verifica se o executável está disponível; não confirma autenticação.
+Você pode usar `{"agent":"codex"}` no `.orquestradorrc` como padrão por projeto.
+O roteamento automático continua escolhendo Antigravity para pesquisa e Claude
+para implementação. Codex participa por seleção explícita ou sequência.
+Esta colaboração é uma sequência finita de chamadas, sem sessões persistentes
+ou troca de mensagens enquanto dois agentes executam ao mesmo tempo.
 
 ## Instalação
 
 Requisitos:
 
 - Node.js >= 20
-- Os CLIs `claude` e `agy` instalados e **já autenticados** na máquina — o
-  orquestrador nunca lida com login/credenciais, só assume que os dois
-  comandos funcionam no PATH.
+- Os CLIs dos agentes que você vai usar instalados e **já autenticados**:
+  `claude`, `agy` e/ou `codex`. O orquestrador reutiliza o login de cada
+  ferramenta e não gerencia credenciais. Para Codex, rode dentro de um
+  repositório Git.
 
 ### Via npm (recomendado)
 
@@ -80,13 +222,15 @@ Dentro da tela:
   modo CLI: troca a estratégia de roteamento inteira pras próximas tarefas.
   `classify` classifica toda tarefa via `claude`, mesmo uma com
   palavra-chave óbvia, pulando a tabela de palavra-chave inteiramente.
-- `/mascot` — liga/desliga o mascote (pinguim ASCII). Ver "Mascote" abaixo.
+- Enquanto você digita, a área de composição mostra a rota sugerida, avisa
+  quando `;` vai disparar tarefas em paralelo e mostra prefixos de agente
+  inválidos antes de enviar. Para comandos, **Tab ou Enter** completa uma
+  abreviação (`/he` → `/help`); Enter em um comando completo o executa.
 - Um comando começando com `/` que não é nenhum desses (`/foo`) mostra uma
   mensagem de erro amigável — não trava a tela nem vira uma tarefa.
 - O modo atual (`agente: automático` ou `agente: claude (forçado)`,
-  `roteamento: keyword`/`classify`, `auto: ligado`/`desligado`, e
-  `mascote: ligado`/`desligado`) fica sempre visível logo abaixo do
-  transcript.
+  `roteamento: keyword`/`classify` e `auto: ligado`/`desligado`) fica
+  sempre visível logo abaixo do transcript.
 - Cada tarefa mostra logo abaixo qual agente foi roteado (`→ antigravity`
   ou `→ antigravity → claude`), e o spinner conta os segundos decorridos
   enquanto roda. Antigravity e Claude Code aparecem em cores diferentes e
@@ -101,39 +245,6 @@ Dentro da tela:
   tarefa em duas partes (pesquisa → implementação) vira uma entrada do
   transcript assim que aquela etapa específica termina, sem esperar a
   outra.
-
-**Mascote:** um pinguim ASCII aparece no banner de boas-vindas, substitui o
-spinner padrão por uma pequena animação "pensando" enquanto uma tarefa
-roda, e reage no final — carinha feliz `(^ ^)` no sucesso, confusa `(? ?)`
-no erro, neutra `(- -)` no cancelamento. Assim fica:
-
-```
-   ___
-  /o o\
- (  >  )
-  \___/
-  d   b
-⚡ orquestrador
-Orquestra Claude Code + Antigravity numa mesma tarefa.
-Digite uma tarefa e aperte Enter. Separe por ; pra rodar várias em paralelo.
-/history · /agent claude|antigravity|auto · /auto · /routing keyword|classify · /mascot · /exit · Ctrl+C
-
-agente: automático   roteamento: keyword   auto: desligado   mascote: ligado
-
-(o o).. Rodando: pesquisar a última versão do Node.js (2s)
-
-(^ ^) [antigravity] (2841ms)
-A versão mais recente do Node.js é a 24.x...
-```
-
-Desligue com `orquestrador --no-mascot` (só funciona sem nenhuma outra
-flag/subcomando — é específico do modo interativo) ou alterne a qualquer
-momento dentro da tela com `/mascot`. A arte é só ASCII puro, bem estreita
-(a linha mais larga tem 8 caracteres), então não deve quebrar nem em
-terminais bem estreitos. **Não tem uma carinha por tarefa no modo em lote
-(`;`)** — o mascote aparece só no spinner/reação de tarefa única e no
-resumo "Rodando N tarefas em paralelo", pra não virar N pinguins piscando
-ao mesmo tempo.
 
 **Múltiplas tarefas em paralelo, na mesma linha:** separe as tarefas por
 `;` e aperte Enter uma vez só:
@@ -427,8 +538,7 @@ máquina.
   "routing": "keyword",
   "auto": false,
   "maxRetries": 5,
-  "retryBaseDelayMs": 2000,
-  "mascot": false
+  "retryBaseDelayMs": 2000
 }
 ```
 
@@ -441,7 +551,6 @@ Todos os campos são opcionais — configure só o que quiser mudar do padrão:
 | `auto`              | `--auto`            | Liga a classificação via IA quando a palavra-chave não decide nada.     |
 | `maxRetries`        | *(sem flag ainda)*  | Máximo de tentativas de retry por etapa em erro transitório.            |
 | `retryBaseDelayMs`  | *(sem flag ainda)*  | Base do backoff exponencial do retry, em milissegundos.                 |
-| `mascot`            | `--no-mascot`       | Liga (`true`) ou desliga (`false`) o mascote na TUI aberta daqui.        |
 
 **Descoberta:** igual ao `CLAUDE.md` do Claude Code — `orquestrador`
 procura um `.orquestradorrc` a partir do diretório onde foi rodado,
@@ -474,7 +583,7 @@ campo é descartado, o resto do arquivo continua valendo:
 Vale tanto pro `orquestrador run` quanto pra TUI (`orquestrador` sem
 argumentos) aberta dentro do projeto — `agent`/`routing`/`auto` seedam o
 modo inicial da tela (ainda dá pra trocar depois com `/agent`/`/routing`/
-`/auto`), e `mascot` seeda se o mascote aparece ou não.
+`/auto`).
 
 ## Arquitetura
 
@@ -540,10 +649,11 @@ modo inicial da tela (ainda dá pra trocar depois com `/agent`/`/routing`/
   existem" (`AGENT_REGISTRY`, `AGENT_NAMES`, `isAgentName()`) — pipeline,
   router, CLI e TUI leem de lá em vez de hardcodar os nomes; ver
   `CLAUDE.md` ("Adicionando um novo agente") pro passo a passo de estender
-  isso pra um terceiro agente. `agents/claudeCode.ts` chama `claude -p`
+  isso pra outros agentes. `agents/claudeCode.ts` chama `claude -p`
   com `--output-format json` e faz o parsing do envelope pra extrair o
-  texto de resposta e o uso de tokens/custo real — só ele, não o
-  antigravity (ver "Limitações conhecidas" pro porquê).
+  texto de resposta e o uso de tokens/custo real. `agents/codex.ts` extrai
+  a resposta e tokens do JSONL de `codex exec`; Antigravity preserva stdout
+  incremental (ver "Limitações conhecidas").
 - **`src/storage/history.ts`** — persistência em SQLite
   (`~/.orquestrador/history.db`, sempre global — um banco só, não por
   projeto). Cada etapa grava `fed_by_step_id` apontando pro id da etapa
@@ -575,11 +685,7 @@ modo inicial da tela (ainda dá pra trocar depois com `/agent`/`/routing`/
   dinamicamente `src/tui/startTui.tsx` — quem só usa `run`/`history`/
   `export` não paga o custo de carregar Ink/React.
 - **`src/tui/`** — tela interativa em Ink/React (`App.tsx` + `startTui.tsx`
-  + `commands.ts` + `PromptInput.tsx` + `mascot.ts`/`Mascot.tsx`). O
-  mascote segue a mesma separação de `commands.ts`: `mascot.ts` é dado/
-  lógica pura (arte ASCII, seleção de frame por estado — testável),
-  `Mascot.tsx` são os componentes Ink que consomem isso (`MascotBanner`,
-  `MascotSpinner`, sem lógica própria pra testar). Reaproveita `runPipeline()` e
+  + `commands.ts` + `PromptInput.tsx`). Reaproveita `runPipeline()` e
   `listRuns()` sem alterar nada neles; tem sua própria versão do prompt de
   ambiguidade (via estado do React, não `readline`) porque Ink assume o
   controle do terminal. O input de texto (`PromptInput.tsx`) também é
@@ -665,7 +771,7 @@ backoff (ex.: um `.orquestradorrc` pedindo delays maiores).
 `src/config.test.ts` cobre `parseOrquestradorConfig` (config completo e
 válido, objeto vazio válido, JSON inválido ou que não é um objeto
 ignorando o arquivo inteiro com aviso, cada campo — `agent`/`routing`/
-`auto`/`maxRetries`/`retryBaseDelayMs`/`mascot` — sendo validado e
+`auto`/`maxRetries`/`retryBaseDelayMs` — sendo validado e
 descartado individualmente quando inválido sem afetar os outros campos, e
 múltiplos campos inválidos gerando um aviso cada), `resolveConfigValue`
 (prioridade CLI > projeto > `undefined`), e `discoverProjectConfig` (acha
@@ -689,7 +795,7 @@ manualmente — mesma decisão já tomada pro resto de `storage/history.ts`
 (ver "Limitações conhecidas" e `CLAUDE.md`).
 
 `src/agents/registry.test.ts` cobre a estrutura do registro de agentes:
-`AGENT_REGISTRY` tem exatamente as entradas claude/antigravity, cada
+`AGENT_REGISTRY` tem as entradas claude/antigravity/codex, cada
 `runner` aponta pra mesma referência de função do wrapper de verdade,
 `streamsIncrementally` reflete o probe manual documentado, `AGENT_NAMES`
 é derivado das chaves do registro (não uma lista hardcoded separada), e
@@ -718,22 +824,11 @@ múltiplas tarefas, e o estado de modo da TUI) também tem testes — é
 lógica pura, sem depender de renderizar a tela de verdade: `/agent
 claude|antigravity` forçando o agente, `/agent auto` resetando pro
 roteamento normal, `/auto` alternando o estado, `/routing keyword|classify`
-mudando a estratégia mantendo o resto do estado, `/mascot` alternando
-`mascotEnabled`, os quatro sendo independentes entre si, comando
-desconhecido/argumento inválido sempre virando erro (nunca uma tarefa,
-nunca uma exceção), 2+ tarefas separadas por `;` virando `{ kind: "tasks"
-}` com os textos aparados, e `;` solto ou sobrando no final caindo de
-volta pro `{ kind: "task" }` original.
-
-`src/tui/mascot.test.ts` cobre a lógica de seleção de frame do mascote —
-sem testar a arte em si: `mascotThinkingFrame` cicla pelos 4 frames de
-"pensando" na ordem certa e dá a volta (wrap-around) depois do último em
-vez de travar ou retornar `undefined`, `mascotFaceFor` devolve uma
-carinha diferente pra cada estado (sucesso/erro/cancelado, as três
-distintas entre si e do mesmo tamanho da carinha de "pensando", pra
-parecer o mesmo personagem reagindo), e a arte do banner tem altura/
-largura modestas e é só ASCII puro (sem caractere multi-byte que possa
-sair torto em terminal limitado).
+mudando a estratégia mantendo o resto do estado, os três sendo
+independentes entre si, comando desconhecido/argumento inválido sempre
+virando erro (nunca uma tarefa, nunca uma exceção), 2+ tarefas separadas
+por `;` virando `{ kind: "tasks" }` com os textos aparados, e `;` solto ou
+sobrando no final caindo de volta pro `{ kind: "task" }` original.
 
 `src/tui/App.tsx` (o componente Ink em si) também tem cobertura, via
 [`ink-testing-library`](https://github.com/vadimdemedes/ink-testing-library)
@@ -757,13 +852,7 @@ rota certa cada uma, mesmo com a mesma palavra-chave nas duas; e
 `/routing`: muda a estratégia e reflete na `StatusLine` sem afetar
 `/agent`/`/auto` já setados, argumento inválido mostra erro sem mudar o
 estado, e uma tarefa rodada depois chega em `runPipeline` com a estratégia
-certa de verdade (não só na exibição); e o mascote: o banner mostra o
-pinguim por padrão e some com `initialMascotEnabled={false}` (equivalente
-ao `--no-mascot`), `/mascot` alterna e reflete na `StatusLine`, o frame de
-"pensando" aparece no lugar do spinner padrão enquanto uma tarefa roda, as
-carinhas de sucesso/erro/cancelamento aparecem junto do resultado
-correspondente, e com o mascote desligado nenhuma carinha aparece em
-lugar nenhum.
+certa de verdade (não só na exibição).
 `promptForAgent` (`src/cli.ts`, o fallback
 interativo do modo não-TUI) continua sem teste automatizado — é
 `readline` puro, sem a alternativa de um stdin falso.
@@ -806,7 +895,7 @@ histórico completo.
   caso, ~7s de atraso extra, não perda de dados). Na prática baixo risco
   hoje: os argumentos passados pros dois CLIs são fixos nos wrappers, o
   texto da tarefa nunca é reinterpretado como flag.
-- **Tokens/custo só são rastreados pro Claude Code** — o Antigravity
+- **Custo em USD só é rastreado pro Claude Code; Codex também registra tokens** — o Antigravity
   também expõe isso via `--output-format json` (confirmado, não é falta de
   suporte no CLI dele), mas usar essa flag trocaria o streaming real dele
   por uma resposta única no final; a decisão foi preservar o streaming.

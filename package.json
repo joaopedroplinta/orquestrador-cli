@@ -1,7 +1,7 @@
 {
   "name": "orquestrador-cli",
   "version": "0.1.0",
-  "description": "CLI que orquestra Claude Code e Antigravity trabalhando juntos numa mesma tarefa",
+  "description": "CLI que orquestra Claude Code, Antigravity e Codex trabalhando juntos numa mesma tarefa",
   "type": "module",
   "bin": {
     "orquestrador": "./dist/cli.js"

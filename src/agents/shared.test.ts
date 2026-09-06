@@ -230,3 +230,25 @@ describe("runAgentCommand — retry com backoff", () => {
     10_000,
   );
 });
+
+describe("diretório e cancelamento de agentes", () => {
+  afterEach(() => mockedExeca.mockReset());
+  it("repassa cwd e sinal sem mudar o cwd global", async () => {
+    const original = process.cwd();
+    const controller = new AbortController();
+    mockedExeca.mockReturnValueOnce(asExecaResult(ok("feito")));
+    await runAgentCommand({ agent: "codex", command: "codex", args: [], prompt: "teste", cwd: "/tmp/worktree", signal: controller.signal });
+    expect(mockedExeca).toHaveBeenCalledWith("codex", [], expect.objectContaining({ cwd: "/tmp/worktree", cancelSignal: controller.signal }));
+    expect(process.cwd()).toBe(original);
+  });
+  it("não inicia processo com sinal já cancelado", async () => {
+    const controller = new AbortController(); controller.abort();
+    await expect(runAgentCommand({ agent: "codex", command: "codex", args: [], prompt: "teste", signal: controller.signal })).rejects.toMatchObject({ kind: "cancelled" });
+    expect(mockedExeca).not.toHaveBeenCalled();
+  });
+  it("cancelamento reportado pelo processo não dispara retry", async () => {
+    mockedExeca.mockReturnValueOnce(asExecaResult({ ...ok(""), isCanceled: true } as ReturnType<typeof ok>));
+    await expect(runAgentCommand({ agent: "codex", command: "codex", args: [], prompt: "teste" })).rejects.toMatchObject({ kind: "cancelled" });
+    expect(mockedExeca).toHaveBeenCalledTimes(1);
+  });
+});

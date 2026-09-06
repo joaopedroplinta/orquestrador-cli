@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import chalk from "chalk";
+import { registerTeamCommands } from "./team/commands.js";
 import { Command } from "commander";
 import ora, { type Ora } from "ora";
 import { writeFileSync } from "node:fs";
@@ -32,13 +33,10 @@ if (projectConfig && projectConfig.warnings.length > 0) {
   }
 }
 
-// A TUI (zero subcomando) aceita a flag --no-mascot direto, sem passar pelo
-// commander — abrir a TUI não é um "comando" registrado nele, é o
-// comportamento de fallback quando não há nenhum. `argv` só pode conter
-// essa flag (ou nada) pra ainda contar como "abrir a TUI".
+// A TUI abre quando não há nenhum subcomando registrado no commander —
+// comportamento de fallback, não um "comando" propriamente dito.
 const argv = process.argv.slice(2);
-const NO_MASCOT_FLAG = "--no-mascot";
-const isTuiInvocation = argv.length === 0 || (argv.length === 1 && argv[0] === NO_MASCOT_FLAG);
+const isTuiInvocation = argv.length === 0;
 
 if (isTuiInvocation) {
   if (!process.stdin.isTTY) {
@@ -53,8 +51,6 @@ if (isTuiInvocation) {
   const { startTui } = await import("./tui/startTui.js");
   const cfg = projectConfig?.config;
   await startTui({
-    // --no-mascot sempre vence; sem a flag, cai pro .orquestradorrc, senão default ligado.
-    mascotEnabled: argv.includes(NO_MASCOT_FLAG) ? false : (cfg?.mascot ?? true),
     initialForcedAgent: cfg?.agent,
     initialRouting: cfg?.routing,
     initialAutoMode: cfg?.auto,
@@ -98,7 +94,7 @@ async function promptForAgent(task: string, spinner: Ora): Promise<AgentName | n
 
   if (!process.stdin.isTTY) {
     console.log(
-      chalk.red("Entrada não é interativa (stdin não é um TTY) — não dá pra perguntar. Use --agent claude|antigravity."),
+      chalk.red("Entrada não é interativa (stdin não é um TTY) — não dá pra perguntar. Use --agent claude|antigravity|codex."),
     );
     return null;
   }
@@ -106,14 +102,14 @@ async function promptForAgent(task: string, spinner: Ora): Promise<AgentName | n
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
     for (;;) {
-      const answer = (await rl.question('Escolha o agente ["claude" | "antigravity" | "cancelar"]: '))
+      const answer = (await rl.question('Escolha o agente ["claude" | "antigravity" | "codex" | "cancelar"]: '))
         .trim()
         .toLowerCase();
 
-      if (answer === "claude" || answer === "antigravity") return answer;
+      if (isAgentName(answer)) return answer;
       if (answer === "cancelar" || answer === "cancel") return null;
 
-      console.log(chalk.red('Opção inválida. Digite "claude", "antigravity" ou "cancelar".'));
+      console.log(chalk.red('Opção inválida. Digite "claude", "antigravity", "codex" ou "cancelar".'));
     }
   } finally {
     rl.close();
@@ -124,7 +120,7 @@ const program = new Command();
 
 program
   .name("orquestrador")
-  .description("Orquestra Claude Code e Antigravity numa mesma tarefa")
+  .description("Orquestra Claude Code, Antigravity e Codex numa mesma tarefa")
   .version("0.1.0");
 
 program
@@ -132,7 +128,7 @@ program
   .description(
     "Roda o fluxo completo pra uma tarefa. Com mais de uma tarefa, roda todas em paralelo (sem fallback interativo)",
   )
-  .option("--agent <agente>", "Força o agente (claude|antigravity), pulando o roteamento automático")
+  .option("--agent <agente>", "Força o agente (claude|antigravity|codex), pulando o roteamento automático")
   .option(
     "--routing <estrategia>",
     'Estratégia de roteamento: "keyword" (padrão, por palavra-chave) ou "classify" ' +
@@ -145,7 +141,7 @@ program
   )
   .action(async (tarefas: string[], opts: { agent?: string; routing?: string; auto?: boolean }) => {
     if (opts.agent && !isAgentName(opts.agent)) {
-      console.error(chalk.red(`--agent inválido: "${opts.agent}". Use "claude" ou "antigravity".`));
+      console.error(chalk.red(`--agent inválido: "${opts.agent}". Use "claude", "antigravity" ou "codex".`));
       process.exitCode = 1;
       return;
     }
@@ -312,4 +308,5 @@ program
     }
   });
 
+registerTeamCommands(program);
 program.parseAsync(process.argv);

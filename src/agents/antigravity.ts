@@ -19,6 +19,8 @@ export async function runAntigravity(options: AgentRunOptions): Promise<AgentRun
     command: "agy",
     args: ["-p", prompt, "--print-timeout", "3m"],
     prompt,
+    cwd: options.cwd,
+    signal: options.signal,
     timeoutMs: options.timeoutMs,
     onChunk: options.onChunk,
     maxRetries: options.maxRetries,

@@ -1,5 +1,5 @@
 import { runClaudeCode } from "../agents/claudeCode.js";
-import { AGENT_NAMES } from "../agents/registry.js";
+import { AGENT_NAMES, isAgentName } from "../agents/registry.js";
 import type { AgentName } from "../types.js";
 
 const ANTIGRAVITY_KEYWORDS = ["pesquisar", "buscar", "o que é", "o que e", "última versão de", "ultima versao de"];
@@ -13,14 +13,13 @@ export interface TaskStep {
   prompt: string;
 }
 
-// Um token isolado (letras/dígitos/hífen/underscore) logo no início da tarefa,
-// seguido de ":" — "claude: implementar X". `\s*` só entre o token e o ":"
-// (nunca dentro do token), então uma frase comum tipo "corrigir bug: o app
-// trava" não bate aqui (o ":" só aparece depois de duas palavras, não logo
-// após a primeira).
-const TASK_AGENT_PREFIX_PATTERN = /^([A-Za-z][A-Za-z0-9_-]*)\s*:\s*/;
+// Um agente ou uma sequência separados por ">", seguida de ":".
+// Uma frase comum como "corrigir bug: o app trava" não é um prefixo.
+const TASK_AGENT_PREFIX_PATTERN = /^([A-Za-z][A-Za-z0-9_-]*(?:\s*>\s*[A-Za-z0-9_-]*)*)\s*:\s*/;
 
 export interface ParsedTaskAgentPrefix {
+  /** Sequência explícita, executada da esquerda para a direita com handoff. */
+  agents?: AgentName[];
   /** Agente indicado por um prefixo "claude:"/"antigravity:" válido, se houver. */
   agent?: AgentName;
   /**
@@ -44,6 +43,12 @@ export function parseTaskAgentPrefix(rawTask: string): ParsedTaskAgentPrefix {
   if (!match) return { text: rawTask };
 
   const candidate = match[1]!.toLowerCase();
+  if (candidate.includes(">")) {
+    const agents = candidate.split(">").map((name) => name.trim());
+    const invalid = agents.find((name) => !isAgentName(name));
+    if (invalid !== undefined) return { text: rawTask, invalidAgentName: invalid || "(vazio)" };
+    return { agents: agents as AgentName[], text: rawTask.slice(match[0].length) };
+  }
   const agent = AGENT_NAMES.find((name) => name === candidate);
   if (!agent) return { text: rawTask, invalidAgentName: match[1] };
 

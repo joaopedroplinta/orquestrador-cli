@@ -82,17 +82,29 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
   const prefix = parseTaskAgentPrefix(options.task);
   if (prefix.invalidAgentName) {
     throw new Error(
-      `Prefixo de agente inválido: "${prefix.invalidAgentName}:" em "${options.task}". Use "claude:" ou "antigravity:" (ou nenhum prefixo).`,
+      `Prefixo de agente inválido: "${prefix.invalidAgentName}:" em "${options.task}". Use "claude:", "antigravity:" ou "codex:" (ou nenhum prefixo).`,
     );
   }
 
   const task = prefix.text;
+  if (!task.trim()) throw new Error("A tarefa não pode estar vazia.");
   const forceAgent = options.forceAgent ?? prefix.agent;
   const routing = options.routing ?? "keyword";
 
   let plan: TaskStep[];
   if (forceAgent) {
     plan = [{ agent: forceAgent, prompt: task }];
+  } else if (prefix.agents) {
+    plan = prefix.agents.map((agent, index, agents) => ({
+      agent,
+      prompt: [
+        `Tarefa do usuário: ${task}`,
+        `Você é ${agent}, etapa ${index + 1}/${agents.length} da colaboração: ${agents.join(" → ")}.`,
+        "Execute a parte da tarefa correspondente à sua posição e às instruções do usuário.",
+        "Use o resultado anterior como contexto; confira o trabalho existente antes de alterar arquivos.",
+        "Ao terminar, informe o que fez, verificações e pendências para o próximo agente.",
+      ].join("\n\n"),
+    }));
   } else if (routing === "classify") {
     // Pula planTask() inteiramente — toda tarefa passa pela IA, não só a
     // que a keyword deixou ambígua. --auto não entra em jogo aqui: a
@@ -108,7 +120,7 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
   if (plan.length === 0) {
     if (!options.resolveAmbiguousAgent) {
       throw new Error(
-        `Não foi possível decidir qual agente usar pra: "${task}". Especifique com --agent claude|antigravity.`,
+        `Não foi possível decidir qual agente usar pra: "${task}". Especifique com --agent claude|antigravity|codex.`,
       );
     }
 
