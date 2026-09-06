@@ -6,8 +6,93 @@ export interface TeamTask {
   agent: AgentName;
   task: string;
   dependsOn: string[];
+  /**
+   * Condição verificável de "pronto" (ex.: "npm test passa e GET /health
+   * responde 200"). Opcional; entra no prompt do agente, que é instruído a
+   * verificá-la antes de concluir. Força o planner a declarar um critério em
+   * vez de deixar "pronto" a critério de cada agente.
+   */
+  acceptance?: string;
+  /**
+   * Caminhos que esta subtarefa pode alterar, em glob (`src/api/**`).
+   * Opcional: um plano sem `owns` roda como antes, sem checagem de
+   * sobreposição — é assim que planos anteriores continuam válidos.
+   */
+  owns?: string[];
 }
 export interface TeamPlan { tasks: TeamTask[] }
+
+/**
+ * Prefixo estático de um glob: tudo antes do primeiro curinga.
+ * `src/api/**` → `src/api/`, `src/*.ts` → `src/`, `README.md` → `README.md`.
+ */
+function staticPrefix(pattern: string): string {
+  const wildcard = pattern.search(/[*?[]/);
+  return wildcard === -1 ? pattern : pattern.slice(0, wildcard);
+}
+
+/**
+ * Dois padrões podem alcançar o mesmo arquivo?
+ *
+ * Deliberadamente conservador: compara os prefixos estáticos em fronteira de
+ * diretório, então `src/*.ts` e `src/*.js` são tratados como sobrepostos
+ * mesmo sem interseção real. O erro que importa evitar é o silencioso (dois
+ * agentes escrevendo no mesmo arquivo e um sobrescrevendo o outro); um falso
+ * positivo só obriga o plano a ser mais específico, o que é barato.
+ */
+export function pathsOverlap(a: string, b: string): boolean {
+  const left = staticPrefix(a.replace(/^\.\//, ""));
+  const right = staticPrefix(b.replace(/^\.\//, ""));
+  if (left === right) return true;
+  const [shorter, longer] = left.length <= right.length ? [left, right] : [right, left];
+  if (!longer.startsWith(shorter)) return false;
+  // Só conta como contido se a fronteira for de diretório: `src/api` não
+  // contém `src/apiary`, mas `src/` contém `src/api/routes.ts`.
+  return shorter.endsWith("/") || longer[shorter.length] === "/";
+}
+
+/** Ids alcançáveis a partir de `id` seguindo dependsOn — quem é ancestral de quem. */
+function reachable(id: string, byId: Map<string, TeamTask>, seen = new Set<string>()): Set<string> {
+  for (const dependency of byId.get(id)?.dependsOn ?? []) {
+    if (seen.has(dependency)) continue;
+    seen.add(dependency);
+    reachable(dependency, byId, seen);
+  }
+  return seen;
+}
+
+/**
+ * Rejeita planos em que duas subtarefas SEM relação de dependência declaram
+ * caminhos que se cruzam. Sem isto, "evite editar o mesmo arquivo" é só uma
+ * frase no prompt do planner — uma esperança — e a colisão só aparece no
+ * merge, depois de já ter pago duas execuções de modelo.
+ *
+ * Tarefas ligadas por dependência (direta ou transitiva) são sequenciadas
+ * pelo escalonador e recebem o commit da outra antes de começar, então
+ * compartilhar caminho ali é legítimo.
+ */
+export function findOwnershipConflicts(tasks: TeamTask[]): string[] {
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const ancestors = new Map(tasks.map((task) => [task.id, reachable(task.id, byId)]));
+  const conflicts: string[] = [];
+
+  for (let i = 0; i < tasks.length; i++) {
+    for (let j = i + 1; j < tasks.length; j++) {
+      const a = tasks[i]!;
+      const b = tasks[j]!;
+      if (!a.owns?.length || !b.owns?.length) continue;
+      if (ancestors.get(a.id)?.has(b.id) || ancestors.get(b.id)?.has(a.id)) continue;
+      for (const left of a.owns) {
+        for (const right of b.owns) {
+          if (pathsOverlap(left, right)) {
+            conflicts.push(`${a.id} ("${left}") e ${b.id} ("${right}") rodam em paralelo e disputam os mesmos caminhos`);
+          }
+        }
+      }
+    }
+  }
+  return conflicts;
+}
 
 /** Valida também o grafo antes de criar worktrees ou chamar agentes. */
 export function parseTeamPlan(value: unknown, allowedAgents?: AgentName[]): TeamPlan {
@@ -29,7 +114,23 @@ export function parseTeamPlan(value: unknown, allowedAgents?: AgentName[]): Team
     if (!Array.isArray(deps) || !deps.every((id) => typeof id === "string") || new Set(deps).size !== deps.length) {
       throw new Error(`Dependências inválidas: ${t.id}.`);
     }
-    return { id: t.id, agent: t.agent, task: t.task.trim(), dependsOn: deps };
+    if (t.acceptance !== undefined && (typeof t.acceptance !== "string" || !t.acceptance.trim() || t.acceptance.length > 2000)) {
+      throw new Error(`Critério de aceite inválido: ${t.id}.`);
+    }
+    const owns = t.owns;
+    if (owns !== undefined) {
+      if (!Array.isArray(owns) || !owns.every((path) => typeof path === "string" && path.trim() && !path.includes("\0"))) {
+        throw new Error(`Caminhos inválidos em "owns": ${t.id}.`);
+      }
+      if (owns.some((path) => path.startsWith("/") || path.split("/").includes(".."))) {
+        throw new Error(`"owns" deve usar caminhos relativos dentro do projeto: ${t.id}.`);
+      }
+    }
+    return {
+      id: t.id, agent: t.agent, task: t.task.trim(), dependsOn: deps,
+      ...(t.acceptance ? { acceptance: (t.acceptance as string).trim() } : {}),
+      ...(owns ? { owns: owns.map((path) => path.trim()) } : {}),
+    };
   });
   const byId = new Map(tasks.map((task) => [task.id, task]));
   if (byId.size !== tasks.length) throw new Error("Ids de subtarefas duplicados.");
@@ -46,6 +147,16 @@ export function parseTeamPlan(value: unknown, allowedAgents?: AgentName[]): Team
     visited.add(id);
   }
   tasks.forEach((task) => visit(task.id));
+
+  // Depois do grafo estar validado (findOwnershipConflicts depende de
+  // dependsOn resolvível e sem ciclo pra calcular quem é ancestral de quem).
+  const conflicts = findOwnershipConflicts(tasks);
+  if (conflicts.length) {
+    throw new Error(
+      `Plano com disputa de arquivos entre tarefas paralelas:\n  - ${conflicts.join("\n  - ")}\n` +
+        "Declare uma dependência entre elas (dependsOn) ou separe os caminhos em \"owns\".",
+    );
+  }
   return { tasks };
 }
 
@@ -62,8 +173,12 @@ export function plannerPrompt(task: string, agents: AgentName[]): string {
     `Agentes disponíveis: ${agents.join(", ")}. Use apenas os necessários.`,
     "Divida em subtarefas concretas com responsabilidades e critérios de conclusão claros.",
     "Subtarefas independentes executarão simultaneamente em worktrees Git isoladas.",
-    "Se uma tarefa precisar dos arquivos/resultados de outra, declare dependsOn. Evite edições concorrentes no mesmo arquivo.",
-    'Responda somente JSON: {"tasks":[{"id":"backend","agent":"codex","task":"...","dependsOn":[]}]}',
+    "Se uma tarefa precisar dos arquivos/resultados de outra, declare dependsOn.",
+    'Declare em "owns" os caminhos que cada subtarefa vai alterar (globs, ex.: "src/api/**").',
+    'Declare em "acceptance" como verificar que a subtarefa terminou (ex.: "npm test passa e GET /health responde 200").',
+    "Duas subtarefas SEM dependência entre si não podem declarar caminhos que se cruzam — o plano é",
+    "rejeitado automaticamente se isso acontecer. Separe os caminhos ou declare a dependência.",
+    'Responda somente JSON: {"tasks":[{"id":"backend","agent":"codex","task":"...","dependsOn":[],"owns":["src/api/**"],"acceptance":"..."}]}',
     "Use no máximo 12 subtarefas e ids únicos em letras minúsculas, números e hífen.",
     `Tarefa: ${task}`,
   ].join("\n\n");

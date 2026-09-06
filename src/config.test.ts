@@ -31,6 +31,22 @@ describe("parseOrquestradorConfig", () => {
     expect(parseOrquestradorConfig("{}")).toEqual({ config: {}, warnings: [] });
   });
 
+  it("aceita defaults de equipe e bootstrap sem shell", () => {
+    const { config, warnings } = parseOrquestradorConfig(JSON.stringify({
+      team: { agents: ["codex", "claude"], concurrency: 2, timeoutMs: 120_000, bootstrap: ["npm", "ci"], bootstrapTimeoutMs: 600_000 },
+    }));
+    expect(warnings).toEqual([]);
+    expect(config.team).toEqual({ agents: ["codex", "claude"], concurrency: 2, timeoutMs: 120_000, bootstrap: ["npm", "ci"], bootstrapTimeoutMs: 600_000 });
+  });
+
+  it("descarta somente campos inválidos de team", () => {
+    const { config, warnings } = parseOrquestradorConfig(JSON.stringify({
+      team: { agents: ["codex", "codex"], concurrency: 13, bootstrap: [] },
+    }));
+    expect(config).toEqual({});
+    expect(warnings).toHaveLength(3);
+  });
+
   it("JSON inválido ignora o arquivo inteiro, com um aviso claro", () => {
     const { config, warnings } = parseOrquestradorConfig("{ isso não é json");
     expect(config).toEqual({});

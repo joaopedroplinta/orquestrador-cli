@@ -127,11 +127,42 @@ Convenções abaixo pro discovery/precedência completos.
   e `agy` já estão autenticados na máquina.
 - **Paralelismo é só entre tarefas top-level independentes**, nunca dentro
   do handoff de uma mesma tarefa: `runPipelines()` (`src/orchestrator/pipeline.ts`)
-  chama `runPipeline()` uma vez por tarefa via `Promise.allSettled` — cada
-  tarefa gera seu próprio `runId`/steps. Dentro de uma tarefa que gera 2
-  etapas (pesquisa → implementação), a execução continua sequencial porque
-  há dependência real de dados (a segunda precisa do output da primeira).
+  chama `runPipeline()` uma vez por tarefa — cada tarefa gera seu próprio
+  `runId`/steps. Dentro de uma tarefa que gera 2 etapas (pesquisa →
+  implementação), a execução continua sequencial porque há dependência real
+  de dados (a segunda precisa do output da primeira).
   Nunca introduzir paralelismo onde há handoff de contexto.
+- **`src/orchestrator/scheduler.ts` (`runScheduled`) é o único motor de
+  execução paralela.** Semáforo, grafo de dependências e cancelamento em
+  cascata moram lá; `runPipelines()` e `runTeam()` usam o mesmo. Antes eram
+  dois motores independentes com garantias opostas — um sem teto, isolamento
+  ou cancelamento, o outro com tudo isso e nenhuma observabilidade — e essa
+  divergência era a dívida estrutural central. **Não reimplemente laço de
+  concorrência em lugar nenhum**: se precisar de escalonamento novo, estenda
+  o kernel. Ele é agnóstico de agente, Git e histórico de propósito (não
+  importa nada de `agents/`, `team/` ou `storage/`) — quem chama decide o que
+  uma tarefa faz.
+- **Nada síncrono e caro no caminho quente enquanto N agentes rodam.** Um
+  `writeFileSync` de estado grande, ou um `readdirSync` num intervalo curto,
+  bloqueia o mesmo event loop que deveria estar despachando o stdout de todos
+  os outros agentes — o custo não é local, é de todo mundo ao mesmo tempo.
+  `TeamStore` (`team/persistence.ts`) existe por isso: eventos vão para
+  `events.jsonl` (append-only, assíncrono) e o snapshot de `state.json` tem
+  debounce. A exceção é `saveNow()`, usado só em transição de status, porque
+  `team send` de outro processo lê o status do disco e não pode ver um valor
+  obsoleto — foi uma regressão real, pega pelos testes ao introduzir o
+  debounce.
+- **Escrita compartilhada entre worktrees precisa de lockfile de verdade**,
+  não de seção crítica em memória: os escritores são PROCESSOS separados
+  (os CLIs de agente), então `O_EXCL` é o único mecanismo que vale. Ver
+  `team/contracts.ts`. A identidade de quem escreve é embutida na geração do
+  helper, por worktree — nunca lida de variável de ambiente, que o agente
+  poderia forjar.
+- **Nunca apresentar custo parcial como se fosse total.** Só o claude reporta
+  custo em dólar; codex reporta tokens sem custo e antigravity não reporta
+  nada. Toda mensagem que soma custo (orçamento, `history --last`, `export`)
+  precisa dizer sobre quantas etapas o número foi medido quando a cobertura é
+  incompleta. Nunca estimar um preço para quem não reporta.
 - **Modo de várias tarefas não usa o fallback interativo** — não dá pra
   abrir vários prompts `readline` concorrentes sem confundir qual pergunta
   é de qual. Uma tarefa ambígua nesse modo vira só um resultado de erro pra

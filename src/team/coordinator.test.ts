@@ -1,11 +1,12 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentName, AgentRunOptions, AgentRunner } from "../types.js";
-import { readTeam, runTeam, sendToTeam } from "./coordinator.js";
+import { cleanupTeam, isTeamInterrupted, readTeam, recoverTeam, runTeam, sendToTeam } from "./coordinator.js";
 import { git } from "./worktrees.js";
+import { writeJson } from "./mailbox.js";
 import type { TeamPlan } from "./plan.js";
 const roots: string[] = [];
 afterEach(() => { roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })); });
@@ -99,6 +100,70 @@ describe("coordenador com Git real", () => {
     expect(readFileSync(join(repo, "base.txt"), "utf8")).toBe("base\n");
   });
 
+  // O guardrail do modo autônomo: sem teto, um plano ruim queima tempo e
+  // dinheiro até alguém perceber. O corte preserva o que já foi feito.
+  it("interrompe a equipe ao estourar o orçamento, preservando o trabalho concluído", async () => {
+    const { repo, directory } = await fixture();
+    const caro: AgentRunner = async (options) => ({
+      ...result("claude", options), usage: { costUsd: 5 },
+    });
+    const state = await runTeam({
+      task: "teste", cwd: repo, directory,
+      // Três tarefas independentes, teto que estoura já na primeira.
+      plan: { tasks: [
+        { id: "um", agent: "claude", task: "a", dependsOn: [] },
+        { id: "dois", agent: "claude", task: "b", dependsOn: [] },
+        { id: "tres", agent: "claude", task: "c", dependsOn: [] },
+      ] },
+      concurrency: 1,
+      budget: { maxCostUsd: 1 },
+      runners: { claude: caro, codex: unused, antigravity: unused },
+    });
+
+    expect(state.status).toBe("cancelled");
+    expect(state.error).toContain("Orçamento");
+    // A primeira concluiu de verdade; as demais foram canceladas sem rodar.
+    expect(state.tasks.filter((t) => t.status === "completed")).toHaveLength(1);
+    expect(state.tasks.filter((t) => t.status === "cancelled")).toHaveLength(2);
+    // Worktrees preservadas para inspeção, como em qualquer cancelamento.
+    expect(existsSync(state.tasks[0]!.worktree)).toBe(true);
+  });
+
+  // Antes, o primeiro conflito fazia `return` e o trabalho das tarefas que
+  // mergeariam limpo era perdido de vista. Agora a integração segue e só o
+  // conflito real fica em aberto pra resolução manual.
+  it("integra as tarefas que fecham limpo mesmo quando outra conflita", async () => {
+    const { repo, directory } = await fixture();
+    // api e ui disputam base.txt; solo escreve num arquivo só dele.
+    const disputa = (agent: AgentName): AgentRunner => async (options) => {
+      writeFileSync(join(options.cwd!, "base.txt"), `${agent}\n`);
+      return result(agent, options);
+    };
+    const isolada: AgentRunner = async (options) => {
+      writeFileSync(join(options.cwd!, "solo.txt"), "sozinho\n");
+      return result("antigravity", options);
+    };
+    const state = await runTeam({
+      task: "teste", cwd: repo, directory,
+      plan: { tasks: [
+        { id: "api", agent: "codex", task: "API", dependsOn: [] },
+        { id: "ui", agent: "claude", task: "UI", dependsOn: [] },
+        { id: "solo", agent: "antigravity", task: "isolada", dependsOn: [] },
+      ] },
+      runners: { codex: disputa("codex"), claude: disputa("claude"), antigravity: isolada },
+    });
+
+    expect(state.status).toBe("conflict");
+    // A tarefa sem conflito entrou na branch de integração em vez de sumir.
+    expect(state.integration?.merged).toContain("solo");
+    expect(existsSync(join(state.integration!.worktree, "solo.txt"))).toBe(true);
+    // E o conflito real continua em aberto na worktree, pra resolver na mão.
+    expect(state.integration?.conflicts.map((c) => c.task)).toEqual(["ui"]);
+    expect(state.integration?.conflicts[0]?.files).toEqual(["base.txt"]);
+    expect(await git(state.integration!.worktree, ["diff", "--name-only", "--diff-filter=U"])).toBe("base.txt");
+    expect(readFileSync(join(repo, "base.txt"), "utf8")).toBe("base\n");
+  });
+
   it("cancela processos ativos sem iniciar tarefas pendentes", async () => {
     const { repo, directory } = await fixture();
     const controller = new AbortController();
@@ -138,6 +203,34 @@ describe("coordenador com Git real", () => {
     expect(state.messages).toEqual([expect.objectContaining({ from: "user", to: "api", text: "use JWT" })]);
     expect(() => sendToTeam(state.id, "api", "tarde", directory)).toThrow("não está executando");
   });
+
+  it("executa o bootstrap sem shell antes de chamar a subtarefa", async () => {
+    const { repo, directory } = await fixture();
+    const worker: AgentRunner = async (options) => {
+      expect(readFileSync(join(options.cwd!, "bootstrap.txt"), "utf8")).toBe("pronto\n");
+      return result("codex", options);
+    };
+    const state = await runTeam({
+      task: "teste", cwd: repo, directory, plan: { tasks: [plan.tasks[0]!] },
+      bootstrap: [process.execPath, "-e", "require('node:fs').writeFileSync('bootstrap.txt', 'pronto\\n')"],
+      runners: { codex: worker, claude: unused, antigravity: unused },
+    });
+    expect(state.status).toBe("completed");
+  });
+
+  it("limpa worktrees concluídas sem apagar alterações manuais e só força quando pedido", async () => {
+    const { repo, directory } = await fixture();
+    const state = await runTeam({ task: "teste", cwd: repo, directory, plan: { tasks: [plan.tasks[0]!] },
+      runners: { codex: async (o) => result("codex", o), claude: unused, antigravity: unused } });
+    writeFileSync(join(state.tasks[0]!.worktree, "manual.txt"), "preservar\n");
+    const safe = await cleanupTeam(state.id, { directory });
+    expect(safe.skippedWorktrees).toEqual(expect.arrayContaining([expect.objectContaining({ path: state.tasks[0]!.worktree })]));
+    expect(existsSync(state.tasks[0]!.worktree)).toBe(true);
+    const forced = await cleanupTeam(state.id, { directory, force: true });
+    expect(forced.removedWorktrees).toContain(state.tasks[0]!.worktree);
+    expect(existsSync(state.tasks[0]!.worktree)).toBe(false);
+    expect(existsSync(state.integration!.worktree)).toBe(false);
+  });
 });
 
 it("respeita limite de uma tarefa ativa mesmo com várias prontas", async () => {
@@ -164,4 +257,22 @@ it("falha no planejamento fica registrada sem disparar executores", async () => 
   expect(state.error).toContain("JSON válido");
   expect(codex).not.toHaveBeenCalled();
   expect(readTeam(state.id, directory).plannerResult).toBeDefined();
+});
+
+it("recupera uma equipe interrompida sem executar ou apagar worktrees", () => {
+  const root = mkdtempSync(join(tmpdir(), "orquestrador-recover-")); roots.push(root);
+  const directory = join(root, "teams");
+  const id = "12345678-1234-1234-1234-123456789abc";
+  const teamDirectory = join(directory, id);
+  const worktree = join(teamDirectory, "api");
+  mkdirSync(teamDirectory, { recursive: true });
+  writeJson(join(teamDirectory, "state.json"), {
+    id, task: "teste", root, base: "abc", directory: teamDirectory, status: "running", startedAt: "2026-01-01T00:00:00.000Z", ownerPid: 999_999_999,
+    tasks: [{ id: "api", agent: "codex", task: "API", dependsOn: [], status: "running", worktree, branch: `orquestrador/${id}/api` }], messages: [],
+  });
+  expect(isTeamInterrupted(readTeam(id, directory))).toBe(true);
+  const state = recoverTeam(id, directory);
+  expect(state.status).toBe("cancelled");
+  expect(state.tasks[0]?.status).toBe("cancelled");
+  expect(readTeam(id, directory).recoveredAt).toBeDefined();
 });

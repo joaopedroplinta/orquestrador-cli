@@ -1,4 +1,7 @@
+import { existsSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { execa } from "execa";
+import { MAILBOX_DIRECTORY } from "./mailbox.js";
 
 const identity = ["-c", "user.name=Orquestrador", "-c", "user.email=orquestrador@localhost", "-c", "commit.gpgSign=false"];
 export async function git(cwd: string, args: string[]): Promise<string> {
@@ -21,6 +24,30 @@ export async function createWorktree(root: string, path: string, branch: string,
 
 export async function mergeCommit(path: string, commit: string): Promise<void> {
   await git(path, ["merge", "--no-edit", "--no-ff", commit]);
+}
+
+/** Arquivos alterados ou não rastreados, ignorando a infraestrutura efêmera da equipe. */
+export async function worktreeChanges(path: string): Promise<string[]> {
+  const output = await git(path, ["status", "--porcelain", "--untracked-files=all"]);
+  return output
+    .split("\n")
+    .filter(Boolean)
+    .filter((line) => !line.slice(3).replace(/^\"|\"$/g, "").startsWith(`${MAILBOX_DIRECTORY}/`));
+}
+
+/**
+ * Remove uma worktree que já foi revisada. A caixa de mensagens é criada pelo
+ * orquestrador e nunca faz parte do commit; removê-la antes permite usar o
+ * `git worktree remove` normal, que continua protegendo alterações do usuário.
+ */
+export async function removeWorktree(root: string, path: string, force = false): Promise<void> {
+  const mailbox = join(path, MAILBOX_DIRECTORY);
+  if (existsSync(mailbox)) rmSync(mailbox, { recursive: true, force: true });
+  await git(root, ["worktree", "remove", ...(force ? ["--force"] : []), path]);
+}
+
+export async function deleteBranch(root: string, branch: string, force = false): Promise<void> {
+  await git(root, ["branch", force ? "-D" : "-d", branch]);
 }
 
 /** Cria commits somente na worktree da tarefa, preservando o checkout original. */

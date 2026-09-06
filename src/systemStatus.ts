@@ -12,11 +12,21 @@ export interface SystemStatus {
   cwd: string;
   projectName: string;
   gitBranch: string | null;
+  gitClean: boolean | null;
   nodeVersion: string;
   historyRunsCount: number;
   codex: CliHealth;
   claude: CliHealth;
   antigravity: CliHealth;
+}
+
+export async function isGitClean(cwd: string = process.cwd()): Promise<boolean | null> {
+  try {
+    const { stdout } = await execa("git", ["status", "--porcelain"], { cwd, timeout: 2000 });
+    return stdout.trim().length === 0;
+  } catch {
+    return null;
+  }
 }
 
 export async function checkCli(command: string, args: string[] = ["--version"]): Promise<CliHealth> {
@@ -29,6 +39,20 @@ export async function checkCli(command: string, args: string[] = ["--version"]):
       installed: false,
       error: error instanceof Error ? error.message : String(error),
     };
+  }
+}
+
+/**
+ * Só responde se o diretório está sob controle de versão — usado para decidir
+ * se vale avisar sobre edição concorrente sem isolamento (fora de um repo não
+ * há worktree pra oferecer como alternativa).
+ */
+export async function isGitRepository(cwd: string = process.cwd()): Promise<boolean> {
+  try {
+    await execa("git", ["rev-parse", "--git-dir"], { cwd, timeout: 2000 });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -46,8 +70,9 @@ export async function getSystemStatus(): Promise<SystemStatus> {
   const cwd = process.cwd();
   const projectName = basename(cwd);
 
-  const [gitBranch, claudeHealth, agyHealth, codexHealth] = await Promise.all([
+  const [gitBranch, gitClean, claudeHealth, agyHealth, codexHealth] = await Promise.all([
     getGitBranch(cwd),
+    isGitClean(cwd),
     checkCli("claude"),
     checkCli("agy"),
     checkCli("codex"),
@@ -65,6 +90,7 @@ export async function getSystemStatus(): Promise<SystemStatus> {
     cwd,
     projectName,
     gitBranch,
+    gitClean,
     nodeVersion: process.version,
     historyRunsCount,
     codex: codexHealth,

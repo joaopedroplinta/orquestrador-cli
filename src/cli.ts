@@ -8,8 +8,10 @@ import { createInterface } from "node:readline/promises";
 import { isAgentName } from "./agents/registry.js";
 import { discoverProjectConfig, resolveConfigValue } from "./config.js";
 import { runPipeline, runPipelines, type PipelineResult } from "./orchestrator/pipeline.js";
+import { DEFAULT_CONCURRENCY } from "./orchestrator/scheduler.js";
 import { buildMarkdownReport, formatUsdCost, totalCostUsd, usageLine } from "./reporting.js";
 import { getLastRun, getRunById, listRuns } from "./storage/history.js";
+import { getSystemStatus, isGitRepository } from "./systemStatus.js";
 import {
   AgentError,
   PipelineCancelledError,
@@ -139,7 +141,14 @@ program
     'Com --routing=keyword (padrão), se a palavra-chave for ambígua, classifica a tarefa via claude antes de ' +
       "perguntar. Sem efeito com --routing=classify (a classificação já sempre acontece)",
   )
-  .action(async (tarefas: string[], opts: { agent?: string; routing?: string; auto?: boolean }) => {
+  .option(
+    "--concurrency <n>",
+    `Máximo de tarefas simultâneas em modo paralelo (padrão ${DEFAULT_CONCURRENCY})`,
+  )
+  .action(async (
+    tarefas: string[],
+    opts: { agent?: string; routing?: string; auto?: boolean; concurrency?: string },
+  ) => {
     if (opts.agent && !isAgentName(opts.agent)) {
       console.error(chalk.red(`--agent inválido: "${opts.agent}". Use "claude", "antigravity" ou "codex".`));
       process.exitCode = 1;
@@ -199,12 +208,37 @@ program
       return;
     }
 
-    console.log(chalk.dim(`Rodando ${tarefas.length} tarefas em paralelo...`));
+    let concurrency = DEFAULT_CONCURRENCY;
+    if (opts.concurrency !== undefined) {
+      concurrency = Number(opts.concurrency);
+      if (!Number.isInteger(concurrency) || concurrency < 1) {
+        console.error(chalk.red(`--concurrency inválido: "${opts.concurrency}". Use um inteiro >= 1.`));
+        process.exitCode = 1;
+        return;
+      }
+    }
+
+    // Tarefas em lote compartilham o diretório atual: elas rodam de verdade em
+    // paralelo, sem lock, e duas que editem o mesmo arquivo se sobrescrevem em
+    // silêncio. Isolamento real (worktree por tarefa + integração) é o que o
+    // modo `team` faz — avisamos aqui em vez de fingir que este caminho é seguro.
+    if (await isGitRepository()) {
+      console.log(
+        chalk.yellow(
+          `⚠ ${tarefas.length} tarefas vão editar o MESMO diretório em paralelo, sem isolamento.\n` +
+            "  Se elas tocarem os mesmos arquivos, uma sobrescreve a outra sem aviso.\n" +
+            `  Para trabalho concorrente que altera arquivos, use: ${chalk.bold("orquestrador team run \"<tarefa>\"")}`,
+        ),
+      );
+    }
+
+    console.log(chalk.dim(`Rodando ${tarefas.length} tarefas em paralelo (até ${concurrency} simultâneas)...`));
     const results = await runPipelines({
       tasks: tarefas,
       forceAgent,
       routing,
       auto,
+      concurrency,
       maxRetries,
       retryBaseDelayMs,
       onTaskRetry: (index, agent, info) => {
@@ -308,5 +342,22 @@ program
     }
   });
 
-registerTeamCommands(program);
+program
+  .command("doctor")
+  .description("Verifica CLIs, Git, Node e a prontidão local para iniciar uma equipe")
+  .action(async () => {
+    const status = await getSystemStatus();
+    console.log(chalk.bold("Diagnóstico do Orquestrador"));
+    console.log(`Node: ${status.nodeVersion}`);
+    console.log(status.gitBranch
+      ? `Git: ${chalk.green(`branch ${status.gitBranch}`)} · ${status.gitClean ? chalk.green("limpo") : chalk.yellow("com alterações")}`
+      : chalk.red("Git: não é um repositório"));
+    for (const [name, health] of [["claude", status.claude], ["agy", status.antigravity], ["codex", status.codex]] as const) {
+      console.log(`${health.installed ? chalk.green("✔") : chalk.red("✖")} ${name}${health.version ? `: ${health.version}` : `: ${health.error}`}`);
+    }
+    console.log(chalk.dim("O diagnóstico confirma executáveis e Git; autenticação só é confirmada na primeira chamada do agente."));
+    if (!status.gitBranch || !status.gitClean) process.exitCode = 1;
+  });
+
+registerTeamCommands(program, projectConfig?.config.team);
 program.parseAsync(process.argv);

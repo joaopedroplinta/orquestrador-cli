@@ -18,6 +18,7 @@ import {
   type AgentErrorKind,
   type AgentName,
   type AgentRunResult,
+  type HistoryRun,
   type RoutingStrategy,
 } from "../types.js";
 import { agentColor } from "./agentColors.js";
@@ -50,7 +51,8 @@ type TranscriptEntry =
   | { kind: "info"; id: string; text: string }
   | { kind: "help"; id: string }
   | { kind: "status-card"; id: string; status: SystemStatus }
-  | { kind: "summary-card"; id: string }
+  /** `runs` vem resolvido de fora: ler SQLite dentro do render bloqueia o loop a cada re-render. */
+  | { kind: "summary-card"; id: string; runs: HistoryRun[] }
   | {
       kind: "retry";
       id: string;
@@ -82,6 +84,16 @@ interface LiveTeam {
   task: string;
   id?: string;
   events: string[];
+  /** Última saída de cada subtarefa em andamento, por id — as "lanes" ao vivo. */
+  lanes: Map<string, { agent: AgentName; output: string }>;
+}
+
+/** Cauda do output que cabe numa lane, pra não empurrar a tela inteira pra cima. */
+const LANE_TAIL_CHARS = 220;
+
+function laneTail(output: string): string {
+  const flat = output.replace(/\s+/g, " ").trim();
+  return flat.length > LANE_TAIL_CHARS ? `…${flat.slice(-LANE_TAIL_CHARS)}` : flat;
 }
 
 function batchPrefix(batch: BatchTag | undefined): string {
@@ -202,7 +214,7 @@ function HelpView() {
           {"  • "}Encadeie agentes: antigravity&gt;codex&gt;claude: pesquisar, implementar e revisar
         </Text>
         <Text dimColor>
-          {"  • "}Use <Text color="green">/team implementar login completo</Text> para agentes coordenados em worktrees
+          {"  • "}Use <Text color="green">/team --agents claude,codex --concurrency 2 implementar login</Text> para configurar a equipe
         </Text>
         <Text dimColor>
           {"  • "}<Text color="green">/export json</Text> exporta todas as execuções para um arquivo JSON
@@ -228,7 +240,10 @@ function StatusCardView({ status }: { status: SystemStatus }) {
         <Box>
           <Text bold>Git Branch: </Text>
           {status.gitBranch ? (
-            <Text color="green">⎇ {status.gitBranch}</Text>
+            <>
+              <Text color="green">⎇ {status.gitBranch}</Text>
+              <Text color={status.gitClean ? "green" : "yellow"}> · {status.gitClean ? "limpo" : "com alterações"}</Text>
+            </>
           ) : (
             <Text dimColor>Não é um repositório git</Text>
           )}
@@ -280,9 +295,7 @@ function StatusCardView({ status }: { status: SystemStatus }) {
   );
 }
 
-function SummaryCardView() {
-  const runs = listRuns(100);
-
+function SummaryCardView({ runs }: { runs: HistoryRun[] }) {
   if (runs.length === 0) {
     return (
       <Box marginY={1}>
@@ -638,22 +651,38 @@ export default function App({
   );
 
   const runTeamFromTui = useCallback(
-    async (task: string) => {
+    async (task: string, options: { agents?: AgentName[]; concurrency?: number } = {}) => {
       setStatus("running");
       setRunningTask(task);
-      setLiveTeam({ task, events: ["Preparando equipe e verificando o repositório Git..."] });
+      setLiveTeam({ task, events: ["Preparando equipe e verificando o repositório Git..."], lanes: new Map() });
       addEntry({ kind: "team-task", id: randomUUID(), text: task });
 
       try {
         const result = await runTeam({
           task,
+          agents: options.agents,
+          concurrency: options.concurrency,
           onEvent: (event) => {
             const formatted = formatTeamEvent(event);
             const id = event.match(/^Equipe ([a-f0-9-]{36}):/)?.[1];
-            setLiveTeam((previous) => previous
-              ? { ...previous, id: id ?? previous.id, events: [...previous.events, formatted].slice(-8) }
-              : previous,
-            );
+            // Uma subtarefa que terminou some das lanes ao vivo — o resultado
+            // dela já vai aparecer no TeamCard no fim.
+            const settled = event.match(/^\[([a-z][a-z0-9-]*)\] (?:concluída|failed|blocked|cancelled)/)?.[1];
+            setLiveTeam((previous) => {
+              if (!previous) return previous;
+              const lanes = settled ? new Map(previous.lanes) : previous.lanes;
+              if (settled) lanes.delete(settled);
+              return { ...previous, id: id ?? previous.id, lanes, events: [...previous.events, formatted].slice(-6) };
+            });
+          },
+          onTaskChunk: (taskId, agent, chunk) => {
+            setLiveTeam((previous) => {
+              if (!previous) return previous;
+              const lanes = new Map(previous.lanes);
+              const current = lanes.get(taskId);
+              lanes.set(taskId, { agent, output: (current?.output ?? "") + chunk });
+              return { ...previous, lanes };
+            });
           },
         });
         addEntry({ kind: "team-result", id: randomUUID(), state: result });
@@ -720,7 +749,7 @@ export default function App({
           })();
           return;
         case "summary":
-          addEntry({ kind: "summary-card", id: randomUUID() });
+          addEntry({ kind: "summary-card", id: randomUUID(), runs: listRuns(100) });
           return;
         case "export": {
           const format = parsed.format;
@@ -791,7 +820,7 @@ export default function App({
           void runTasksInParallel(parsed.texts);
           return;
         case "team":
-          void runTeamFromTui(parsed.task);
+          void runTeamFromTui(parsed.task, { agents: parsed.agents, concurrency: parsed.concurrency });
           return;
       }
     },
@@ -837,6 +866,22 @@ export default function App({
           </Text>
           <Text>{liveTeam.task}</Text>
           {liveTeam.events.map((event, index) => <Text key={`${index}-${event}`} dimColor>{event}</Text>)}
+          {/* Uma lane por subtarefa em andamento: sem isto a tela fica muda
+              enquanto N agentes trabalham por minutos. Caracteres de texto
+              puro em vez de Box com borda — mesmo cuidado com volume de bytes
+              por frame que o modo em lote já adota (ver bug #3 no CLAUDE.md). */}
+          {[...liveTeam.lanes.entries()].map(([taskId, lane]) => (
+            <Box key={taskId} flexDirection="column" marginTop={1}>
+              <Text>
+                {"┌ "}
+                <Text bold color={agentColor(lane.agent)}>{taskId} · {lane.agent}</Text>
+                {!AGENT_REGISTRY[lane.agent].streamsIncrementally && (
+                  <Text dimColor> (entrega tudo no fim)</Text>
+                )}
+              </Text>
+              {lane.output.length > 0 && <Text dimColor>{`│ ${laneTail(lane.output)}`}</Text>}
+            </Box>
+          ))}
           {liveTeam.id && <Text dimColor>Em outro terminal: orquestrador team status {liveTeam.id} --messages</Text>}
         </Box>
       )}
@@ -898,7 +943,7 @@ function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
     case "status-card":
       return <StatusCardView status={entry.status} />;
     case "summary-card":
-      return <SummaryCardView />;
+      return <SummaryCardView runs={entry.runs} />;
     case "task":
       return (
         <Box marginTop={1} flexDirection="column">

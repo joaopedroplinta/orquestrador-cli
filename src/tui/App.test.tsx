@@ -575,7 +575,7 @@ describe("Equipe na TUI", () => {
         worktree: "/teams/api", branch: "orquestrador/api", commit: "abc",
       }],
       messages: [],
-      integration: { worktree: "/teams/integration", branch: "orquestrador/integration", merged: ["api"] },
+      integration: { worktree: "/teams/integration", branch: "orquestrador/integration", merged: ["api"], conflicts: [], failed: [] },
     };
 
     const { lastFrame, stdin } = render(<App />);
@@ -596,5 +596,52 @@ describe("Equipe na TUI", () => {
     expect(lastFrame()).toContain("Equipe 12345678 · completed");
     expect(lastFrame()).toContain("orquestrador/integration");
     expect(lastFrame()).toContain("descreva uma tarefa...");
+  });
+
+  it("mostra uma lane ao vivo por subtarefa, com o output chegando", async () => {
+    let capturedOptions!: Parameters<typeof runTeam>[0];
+    mockedRunTeam.mockImplementation((options) => new Promise(() => { capturedOptions = options; }));
+
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "/team implementar login");
+
+    capturedOptions.onTaskChunk?.("api", "antigravity", "criando rota ");
+    capturedOptions.onTaskChunk?.("web", "codex", "montando form");
+    await tick();
+
+    // Duas lanes distintas, cada uma com o texto da sua própria subtarefa.
+    expect(lastFrame()).toContain("api · antigravity");
+    expect(lastFrame()).toContain("criando rota");
+    expect(lastFrame()).toContain("web · codex");
+    expect(lastFrame()).toContain("montando form");
+  });
+
+  it("acumula os pedaços de uma lane e a remove quando a subtarefa conclui", async () => {
+    let capturedOptions!: Parameters<typeof runTeam>[0];
+    mockedRunTeam.mockImplementation((options) => new Promise(() => { capturedOptions = options; }));
+
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "/team implementar login");
+
+    capturedOptions.onTaskChunk?.("api", "antigravity", "parte um ");
+    capturedOptions.onTaskChunk?.("api", "antigravity", "parte dois");
+    await tick();
+    expect(lastFrame()).toContain("parte um parte dois");
+
+    capturedOptions.onEvent?.("[api] concluída (abc12345)");
+    await tick();
+    expect(lastFrame()).not.toContain("parte um parte dois");
+  });
+
+  it("marca a lane de um agente que só entrega no fim", async () => {
+    let capturedOptions!: Parameters<typeof runTeam>[0];
+    mockedRunTeam.mockImplementation((options) => new Promise(() => { capturedOptions = options; }));
+
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "/team implementar login");
+
+    capturedOptions.onTaskChunk?.("api", "codex", "tudo de uma vez");
+    await tick();
+    expect(lastFrame()).toContain("(entrega tudo no fim)");
   });
 });

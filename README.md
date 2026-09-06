@@ -50,6 +50,60 @@ Cada tarefa recebe uma branch e worktree próprias; `process.cwd()` global não 
 alterado. Quando as dependências terminam, seus commits são integrados na
 worktree da tarefa dependente e seus resumos entram no contexto do agente.
 
+**Posse de arquivos (`owns`):** cada subtarefa pode declarar quais caminhos vai
+alterar. Duas subtarefas **sem dependência entre si** que declarem caminhos
+cruzados fazem o plano ser **rejeitado antes de criar worktree ou chamar
+modelo** — sem isso, a colisão só apareceria no merge, depois de já ter pago
+duas execuções. A checagem é conservadora por fronteira de diretório
+(`src/api/**` e `src/api/x.ts` colidem; `src/api/**` e `src/apiary/**` não;
+`src/*.ts` e `src/*.js` são tratados como colisão mesmo sem interseção real —
+o falso positivo só obriga o plano a ser mais específico). `owns` é opcional:
+um plano sem ele roda como antes, sem checagem.
+
+**Critério de aceite (`acceptance`):** condição verificável de "pronto" que
+entra no prompt do agente, que é instruído a checá-la antes de concluir.
+
+```json
+{"id":"backend","agent":"codex","task":"Implementar API","dependsOn":[],
+ "owns":["src/api/**"],"acceptance":"npm test passa e GET /health responde 200"}
+```
+
+**Orçamento (`--max-cost`, `--max-duration`):** tetos para execução sem
+supervisão. Ao atingir o limite, o lote é interrompido e worktrees/resultados
+parciais são preservados como em qualquer cancelamento; a checagem acontece a
+cada conclusão de subtarefa, porque interromper no meio de uma chamada de
+modelo não devolveria o gasto. **A cobertura de custo é parcial por natureza**:
+só o claude reporta custo em dólar (codex reporta tokens sem custo, antigravity
+não reporta nada, e nunca inventamos um preço). Quando nem toda etapa reportou,
+a mensagem de parada diz sobre quantas etapas o número foi medido e avisa que o
+gasto real é maior — em vez de apresentar um valor parcial como se fosse o total.
+
+```bash
+node dist/cli.js team run "implementar login" --max-cost 5 --max-duration 900000
+```
+
+**Quadro de contratos:** o canal de mensagens é best-effort — entrega não é
+leitura — então um contrato de API que só vive numa mensagem pode nunca ser
+lido, e dois agentes definem a mesma interface de formas divergentes sem saber.
+Cada worktree recebe também um `contracts.cjs`, apontando para um quadro único
+da equipe:
+
+```bash
+node .orquestrador-team/contracts.cjs list
+node .orquestrador-team/contracts.cjs set auth.token "JWT com claim sub"
+node .orquestrador-team/contracts.cjs get auth.token
+```
+
+Chave nova é livre e o dono reescreve a sua; quem tenta **redefinir a chave de
+outra subtarefa é recusado**, com o valor atual na mensagem, e precisa se
+adequar ou combinar a mudança antes. Como N processos escrevem no mesmo
+arquivo, a exclusão mútua é um lockfile de verdade. A identidade do escritor é
+embutida na geração do helper, por worktree — um agente não se passa por outro
+mexendo no ambiente.
+
+**Acompanhar de outro terminal:** `team status <id> --follow` segue os eventos
+ao vivo até a equipe chegar a um estado terminal.
+
 **Mensagens durante a execução:** cada worktree recebe um utilitário local,
 que não exige instalar dependências:
 
@@ -84,7 +138,9 @@ das tarefas e os une em uma branch `orquestrador/<id>/integration`. A branch e
 os arquivos do checkout original permanecem intactos. Ao finalizar, a CLI mostra
 o diretório da integração e comandos para revisar o diff e fazer merge depois
 de testar. Um conflito interrompe a integração e preserva os arquivos conflitantes
-nessa worktree. Uma tarefa que falha bloqueia suas dependentes; as independentes
+nessa worktree. Quando a integração de uma dependência em uma subtarefa falha por
+conflito, a worktree dessa subtarefa também fica com o merge pendente: resolva-o
+manualmente ou execute `git merge --abort` nela antes de reutilizá-la. Uma tarefa que falha bloqueia suas dependentes; as independentes
 terminam e a integração é marcada como parcial. O modo não faz retry automático
 de tarefas que podem ter alterado arquivos.
 
@@ -92,15 +148,24 @@ de tarefas que podem ter alterado arquivos.
 cancela as chamadas ativas e impede novas tarefas; resultados e worktrees ficam
 preservados. Estado, respostas, uso reportado e mensagens ficam em
 `~/.orquestrador/teams/<id>/state.json`, consultáveis com `team status`, separados
-do histórico SQLite de `run`. Em término abrupto do processo, o último estado
-pode continuar marcado como ativo; ainda não há recuperação automática.
+do histórico SQLite de `run`. `team list` mostra o histórico e marca como
+interrompida uma equipe cujo processo não existe mais. Nesse caso, execute
+`team recover <id>` para fechar o registro sem perder worktrees; ele não tenta
+reexecutar agentes automaticamente, pois uma worktree pode conter alterações
+parciais que precisam ser inspecionadas primeiro.
 
 Worktrees não recebem `node_modules`, arquivos ignorados ou credenciais do
-projeto original. A preparação de dependências deve estar na subtarefa quando
-necessária. A revisão/teste da integração é uma tarefa explícita do plano;
-sucesso dos processos não comprova por si só que o código está correto.
-Não há limpeza automática: depois de revisar/guardar os resultados, remova
-worktrees com `git worktree remove <caminho>` e branches com `git branch -d <branch>`.
+projeto original. Quando todas usam a mesma preparação, configure `team.bootstrap`
+no `.orquestradorrc`; o comando e seus argumentos são executados diretamente,
+sem shell, antes de cada subtarefa. A revisão/teste da integração é uma tarefa
+explícita do plano; sucesso dos processos não comprova por si só que o código
+está correto.
+
+Não há limpeza automática. Depois de revisar/guardar os resultados, use
+`team cleanup <id>`: ele remove apenas worktrees sem alterações pendentes e
+mantém qualquer uma que precise de atenção. `--force` descarta alterações
+pendentes; `--delete-branches` também remove as branches da equipe, portanto só
+use essas flags depois de guardar o que for necessário.
 O comando `team` é usado no terminal; os comandos e lotes da TUI continuam com
 o comportamento anterior. Na TUI, abra `orquestrador` e digite:
 
@@ -108,9 +173,9 @@ o comportamento anterior. Na TUI, abra `orquestrador` e digite:
 /team implementar login completo com backend, frontend e testes
 ```
 
-A tela acompanha o planejamento, as subtarefas e a integração. A equipe usa os
-agentes padrão disponíveis; para escolher agentes, concorrência ou fornecer um
-plano JSON, use o comando `team run` no terminal.
+A tela acompanha o planejamento, as subtarefas e a integração. Escolha agentes
+e concorrência no próprio campo: `/team --agents claude,codex --concurrency 2
+implementar login`. Para fornecer um plano JSON, use `team run` no terminal.
 
 ## Codex e colaboração entre agentes
 
@@ -408,7 +473,19 @@ Duas diferenças importantes em relação ao modo de uma tarefa só:
 orquestrador run "pesquisar X" "corrigir Y" "implementar Z"
 # roda as três ao mesmo tempo; se "corrigir Y" falhar, "pesquisar X" e
 # "implementar Z" ainda são reportadas normalmente
+
+orquestrador run "t1" "t2" "t3" "t4" "t5" --concurrency 2
+# no máximo 2 processos de agente ativos por vez
 ```
+
+`--concurrency` limita quantas rodam ao mesmo tempo (padrão 4). Sem teto, um
+lote grande subiria um processo de CLI de agente por tarefa, todos de uma vez.
+
+> ⚠️ **Estas tarefas compartilham o diretório atual.** Elas rodam de verdade em
+> paralelo, sem lock: se duas tocarem o mesmo arquivo, uma sobrescreve a outra
+> sem aviso. Dentro de um repositório git o comando avisa disso. Para trabalho
+> concorrente que **altera arquivos**, use `orquestrador team run` — lá cada
+> subtarefa tem worktree própria e há uma etapa de integração.
 
 #### Agente por tarefa dentro de um lote (`agente:` no início da tarefa)
 
@@ -538,7 +615,14 @@ máquina.
   "routing": "keyword",
   "auto": false,
   "maxRetries": 5,
-  "retryBaseDelayMs": 2000
+  "retryBaseDelayMs": 2000,
+  "team": {
+    "agents": ["claude", "codex"],
+    "concurrency": 2,
+    "timeoutMs": 300000,
+    "bootstrap": ["npm", "ci"],
+    "bootstrapTimeoutMs": 600000
+  }
 }
 ```
 
@@ -551,6 +635,12 @@ Todos os campos são opcionais — configure só o que quiser mudar do padrão:
 | `auto`              | `--auto`            | Liga a classificação via IA quando a palavra-chave não decide nada.     |
 | `maxRetries`        | *(sem flag ainda)*  | Máximo de tentativas de retry por etapa em erro transitório.            |
 | `retryBaseDelayMs`  | *(sem flag ainda)*  | Base do backoff exponencial do retry, em milissegundos.                 |
+| `team`              | `team run`          | Defaults de equipe: agentes, concorrência, timeout e bootstrap.         |
+
+Em `team`, `bootstrap` é uma lista de programa e argumentos, sem expansão de
+shell: `["npm", "ci"]` executa `npm ci` dentro de cada worktree imediatamente
+antes do agente. Ele é útil quando cada subtarefa precisa de dependências, mas
+pode custar tempo e rede; omita-o quando o projeto não precisar dessa preparação.
 
 **Descoberta:** igual ao `CLAUDE.md` do Claude Code — `orquestrador`
 procura um `.orquestradorrc` a partir do diretório onde foi rodado,
@@ -632,8 +722,24 @@ modo inicial da tela (ainda dá pra trocar depois com `/agent`/`/routing`/
   sequência, repassando o output de uma etapa como `context` de entrada da
   próxima. Loga cada etapa (sucesso ou erro) no histórico. `runPipelines()`
   roda várias tarefas independentes chamando `runPipeline()` uma vez por
-  tarefa via `Promise.allSettled` — cada uma com seu próprio `runId`, sem
-  afetar as outras se uma falhar.
+  tarefa — cada uma com seu próprio `runId`, sem afetar as outras se uma
+  falhar.
+- **`src/orchestrator/scheduler.ts`** — o kernel de execução paralela que
+  `runPipelines()` e o modo `team` compartilham: semáforo de concorrência,
+  grafo de dependências e cancelamento em cascata. Agnóstico de agente, Git
+  e histórico — não importa nada de `agents/`, `team/` ou `storage/`; quem
+  chama decide o que uma "tarefa" faz. Antes existiam dois motores paralelos
+  independentes com garantias opostas (um sem teto, isolamento ou
+  cancelamento; o outro com tudo isso e nenhuma observabilidade), e unificá-los
+  é o que deu ao lote de `run` o cancelamento e o teto que só o `team` tinha.
+- **`src/team/`** — o modo de equipe: `coordinator.ts` (orquestra worktrees,
+  mailbox, contratos e integração, delegando o escalonamento ao kernel acima),
+  `plan.ts` (valida o DAG, a posse de arquivos e os critérios de aceite),
+  `worktrees.ts` (as chamadas de Git), `mailbox.ts` (mensagens best-effort
+  entre agentes), `contracts.ts` (o quadro de acordos com dono e lockfile),
+  `budget.ts` (tetos de custo/tempo) e `persistence.ts` (snapshot com debounce
+  + `events.jsonl` append-only, ambos assíncronos, para que o caminho quente
+  não trave o event loop).
 - **`src/agents/`** — wrappers finos em volta de `execa` que disparam
   `claude -p "..."` e `agy -p "..." --print-timeout 3m`, com timeout
   configurável e tratamento consistente de erro (timeout, comando não

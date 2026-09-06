@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { lstat, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { writeJsonAtomic } from "./persistence.js";
 
 export interface TeamMessage {
   id: string;
@@ -11,6 +13,11 @@ export interface TeamMessage {
 }
 export const MAILBOX_DIRECTORY = ".orquestrador-team";
 
+/**
+ * Escrita síncrona, mantida só para a montagem inicial das caixas (antes de
+ * qualquer agente rodar) e para `queueUserMessage`, que roda num processo
+ * separado e de vida curta. O caminho quente usa `writeJsonAtomic`.
+ */
 export function writeJson(path: string, value: unknown): void {
   const temporary = `${path}.${randomUUID()}.tmp`;
   writeFileSync(temporary, JSON.stringify(value, null, 2), { mode: 0o600 });
@@ -53,32 +60,52 @@ export function createMailbox(worktree: string, members: string[]): string {
   return root;
 }
 
+/**
+ * Entrega mensagens entre as worktrees. Todo o I/O é assíncrono: `flush` roda
+ * periodicamente enquanto N agentes escrevem em paralelo, então bloquear o
+ * loop aqui atrasaria o streaming de todos eles ao mesmo tempo.
+ *
+ * `flush` é reentrante-safe: chamadas concorrentes (o intervalo disparando
+ * enquanto uma tarefa termina e chama `flush` também) compartilham a mesma
+ * passagem em vez de duplicar entregas.
+ */
 export class TeamMailbox {
   readonly messages: TeamMessage[] = [];
   private seen = new Set<string>();
+  private inFlight: Promise<void> | undefined;
+
   constructor(private endpoints: Map<string, string>, private onMessage?: (message: TeamMessage) => void) {}
 
-  /** Chamado continuamente enquanto os CLIs trabalham e também após cada conclusão. */
-  flush(): void {
+  flush(): Promise<void> {
+    this.inFlight ??= this.drain().finally(() => {
+      this.inFlight = undefined;
+    });
+    return this.inFlight;
+  }
+
+  private async drain(): Promise<void> {
     for (const [from, root] of this.endpoints) {
       const outbox = join(root, "outbox");
-      if (!lstatSync(outbox).isDirectory()) throw new Error(`Outbox inválida: ${from}`);
-      for (const file of readdirSync(outbox).sort()) {
+      if (!(await lstat(outbox)).isDirectory()) throw new Error(`Outbox inválida: ${from}`);
+      for (const file of (await readdir(outbox)).sort()) {
         if (!/^[a-f0-9-]{36}\.json$/.test(file) || this.seen.has(`${from}/${file}`)) continue;
         const path = join(outbox, file);
-        if (!lstatSync(path).isFile() || lstatSync(path).size > 70_000) continue;
+        const stats = await lstat(path);
+        if (!stats.isFile() || stats.size > 70_000) continue;
         let input;
-        try { input = JSON.parse(readFileSync(path, "utf8")); } catch { continue; }
+        try { input = JSON.parse(await readFile(path, "utf8")); } catch { continue; }
         if (!input || input.id !== file.slice(0, -5) || typeof input.text !== "string" || !input.text.trim() || input.text.length > 16_000) continue;
         if (input.to !== "all" && !this.endpoints.has(input.to)) continue;
         const message: TeamMessage = { id: `${from}-${input.id}`, from, to: input.to, text: input.text, timestamp: new Date().toISOString() };
         const recipients = input.to === "all" ? [...this.endpoints.keys()].filter((id) => id !== from) : [input.to];
+        // Marca antes de entregar: uma falha parcial não pode fazer a próxima
+        // passagem reentregar o que já chegou em alguns destinatários.
+        this.seen.add(`${from}/${file}`);
         for (const recipient of recipients) {
           const inbox = join(this.endpoints.get(recipient)!, "inbox");
-          if (!lstatSync(inbox).isDirectory()) throw new Error(`Inbox inválida: ${recipient}`);
-          writeJson(join(inbox, `${message.id}.json`), message);
+          if (!(await lstat(inbox)).isDirectory()) throw new Error(`Inbox inválida: ${recipient}`);
+          await writeJsonAtomic(join(inbox, `${message.id}.json`), message);
         }
-        this.seen.add(`${from}/${file}`);
         this.messages.push(message);
         this.onMessage?.(message);
       }

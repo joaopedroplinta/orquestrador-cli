@@ -45,8 +45,8 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
   },
   {
     name: "team",
-    synopsis: "/team <tarefa>",
-    description: "Planeja e executa uma equipe paralela em worktrees isoladas",
+    synopsis: "/team [opções] <tarefa>",
+    description: "Planeja uma equipe; aceita --agents e --concurrency antes da tarefa",
     category: "Agente e Roteamento",
   },
   {
@@ -101,7 +101,7 @@ export type ParsedInput =
   | { kind: "task"; text: string }
   /** 2+ tarefas separadas por ";" na mesma linha — rodam em paralelo via runPipelines. */
   | { kind: "tasks"; texts: string[] }
-  | { kind: "team"; task: string }
+  | { kind: "team"; task: string; agents?: AgentName[]; concurrency?: number }
   | { kind: "exit" }
   | { kind: "history" }
   | { kind: "status" }
@@ -116,6 +116,42 @@ export type ParsedInput =
 
 function isRoutingStrategy(value: string): value is RoutingStrategy {
   return value === "keyword" || value === "classify";
+}
+
+function parseTeamCommand(rawArg: string): Extract<ParsedInput, { kind: "team" | "error" }> {
+  const words = rawArg.split(/\s+/).filter(Boolean);
+  let agents: AgentName[] | undefined;
+  let concurrency: number | undefined;
+  while (words[0]?.startsWith("--")) {
+    const option = words.shift();
+    const value = words.shift();
+    if (!value) return { kind: "error", message: `A opção ${option} precisa de um valor.` };
+    if (option === "--agents") {
+      const parsed = value.split(",").map((agent) => agent.trim().toLowerCase());
+      if (!parsed.length || !parsed.every(isAgentName) || new Set(parsed).size !== parsed.length) {
+        return { kind: "error", message: "Use --agents claude,codex,antigravity (ou um subconjunto sem repetição)." };
+      }
+      agents = parsed;
+      continue;
+    }
+    if (option === "--concurrency") {
+      const parsed = Number(value);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 12) {
+        return { kind: "error", message: "Use --concurrency com um inteiro entre 1 e 12." };
+      }
+      concurrency = parsed;
+      continue;
+    }
+    return { kind: "error", message: `Opção de /team desconhecida: ${option}. Use --agents ou --concurrency.` };
+  }
+  const task = words.join(" ").trim();
+  if (!task) return { kind: "error", message: 'Uso: "/team [--agents claude,codex] [--concurrency 2] <tarefa>".' };
+  return {
+    kind: "team",
+    task,
+    ...(agents ? { agents } : {}),
+    ...(concurrency ? { concurrency } : {}),
+  };
 }
 
 // Pura e sem I/O de propósito: a TUI (Ink) não tem teste automatizado, mas o
@@ -145,8 +181,7 @@ export function parseInput(raw: string): ParsedInput {
     case "history":
       return { kind: "history" };
     case "team":
-      if (rawArg) return { kind: "team", task: rawArg };
-      return { kind: "error", message: 'Uso: "/team <tarefa>". Ex.: /team implementar login completo com testes' };
+      return parseTeamCommand(rawArg);
     case "help":
       return { kind: "help" };
     case "status":
