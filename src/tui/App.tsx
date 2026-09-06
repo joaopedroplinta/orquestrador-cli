@@ -12,6 +12,7 @@ import {
   type AgentErrorKind,
   type AgentName,
   type AgentRunResult,
+  type RoutingStrategy,
 } from "../types.js";
 import { applyModeCommand, INITIAL_MODE_STATE, parseInput, type ModeState } from "./commands.js";
 import { MascotBanner, MascotSpinner } from "./Mascot.js";
@@ -153,11 +154,31 @@ function StatusLine({ mode }: { mode: ModeState }) {
 }
 
 export interface AppProps {
-  /** Estado inicial do mascote — seedado pela flag --no-mascot do CLI (padrão: ligado). */
+  /** Estado inicial do mascote — seedado por --no-mascot ou pelo .orquestradorrc do projeto (padrão: ligado). */
   initialMascotEnabled?: boolean;
+  /** Seed de ModeState.forcedAgent — vem do campo "agent" do .orquestradorrc, se houver. */
+  initialForcedAgent?: AgentName;
+  /** Seed de ModeState.routing — vem do campo "routing" do .orquestradorrc, se houver. */
+  initialRouting?: RoutingStrategy;
+  /** Seed de ModeState.autoMode — vem do campo "auto" do .orquestradorrc, se houver. */
+  initialAutoMode?: boolean;
+  /**
+   * Repassados direto em todo runPipeline/runPipelines da sessão — vêm do
+   * .orquestradorrc do projeto. Não fazem parte de ModeState (sem slash
+   * command pra mudar em runtime, diferente de agente/roteamento/auto/mascote).
+   */
+  maxRetries?: number;
+  retryBaseDelayMs?: number;
 }
 
-export default function App({ initialMascotEnabled = true }: AppProps = {}) {
+export default function App({
+  initialMascotEnabled = true,
+  initialForcedAgent,
+  initialRouting,
+  initialAutoMode,
+  maxRetries,
+  retryBaseDelayMs,
+}: AppProps = {}) {
   const { exit } = useApp();
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([
     { kind: "banner", id: randomUUID(), mascotEnabled: initialMascotEnabled },
@@ -166,7 +187,12 @@ export default function App({ initialMascotEnabled = true }: AppProps = {}) {
   const [runningTask, setRunningTask] = useState<string | null>(null);
   const [pendingAgentPrompt, setPendingAgentPrompt] = useState<PendingAgentPrompt | undefined>();
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [mode, setMode] = useState<ModeState>({ ...INITIAL_MODE_STATE, mascotEnabled: initialMascotEnabled });
+  const [mode, setMode] = useState<ModeState>({
+    forcedAgent: initialForcedAgent ?? INITIAL_MODE_STATE.forcedAgent,
+    routing: initialRouting ?? INITIAL_MODE_STATE.routing,
+    autoMode: initialAutoMode ?? INITIAL_MODE_STATE.autoMode,
+    mascotEnabled: initialMascotEnabled,
+  });
   const [streamingAgent, setStreamingAgent] = useState<AgentName | null>(null);
   const [streamingOutput, setStreamingOutput] = useState("");
   const [liveTasks, setLiveTasks] = useState<LiveTask[] | null>(null);
@@ -213,6 +239,8 @@ export default function App({ initialMascotEnabled = true }: AppProps = {}) {
           forceAgent: mode.forcedAgent ?? undefined,
           routing: mode.routing,
           auto: mode.autoMode,
+          maxRetries,
+          retryBaseDelayMs,
           onStepStart: (agent) => {
             setStreamingAgent(agent);
             setStreamingOutput("");
@@ -276,7 +304,7 @@ export default function App({ initialMascotEnabled = true }: AppProps = {}) {
         setStreamingOutput("");
       }
     },
-    [addEntry, mode],
+    [addEntry, mode, maxRetries, retryBaseDelayMs],
   );
 
   const runTasksInParallel = useCallback(
@@ -302,6 +330,8 @@ export default function App({ initialMascotEnabled = true }: AppProps = {}) {
           forceAgent: mode.forcedAgent ?? undefined,
           routing: mode.routing,
           auto: mode.autoMode,
+          maxRetries,
+          retryBaseDelayMs,
           onTaskStepStart: (index, agent) => {
             setLiveTasks((prev) => prev?.map((t, i) => (i === index ? { ...t, agent, streamingOutput: "" } : t)) ?? prev);
           },
@@ -361,7 +391,7 @@ export default function App({ initialMascotEnabled = true }: AppProps = {}) {
         setLiveTasks(null);
       }
     },
-    [addEntry, mode],
+    [addEntry, mode, maxRetries, retryBaseDelayMs],
   );
 
   const handleSubmit = useCallback(

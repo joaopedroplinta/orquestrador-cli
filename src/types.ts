@@ -29,6 +29,8 @@ export interface AgentRunOptions {
   onChunk?: (chunk: string) => void;
   /** Máximo de tentativas de RETRY (não conta a tentativa inicial) em erro transitório — padrão 3, ver runAgentCommand em agents/shared.ts. */
   maxRetries?: number;
+  /** Base do backoff exponencial em ms (delay = base * 2^(tentativa-1)) — padrão 1000, ver DEFAULT_RETRY_BASE_DELAY_MS em agents/shared.ts. */
+  retryBaseDelayMs?: number;
   /** Chamado antes de cada espera de backoff, com detalhes da tentativa que acabou de falhar. */
   onRetry?: (info: AgentRetryAttempt & { maxRetries: number }) => void;
 }
@@ -140,4 +142,6 @@ export interface HistoryRun {
   startedAt: string;
   finishedAt?: string;
   steps: HistoryStep[];
+  /** Diretório de onde `orquestrador` foi rodado (process.cwd() no momento do run) — usado pro filtro de histórico por projeto. Ausente em runs de antes dessa coluna existir. */
+  cwd?: string;
 }

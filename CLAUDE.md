@@ -61,13 +61,18 @@ orquestrador run "<tarefa>" --agent claude|antigravity   # força o agente
 orquestrador run "<tarefa>" --auto       # classifica via claude se ambígua (routing=keyword)
 orquestrador run "<tarefa>" --routing=classify  # classifica TODA tarefa via claude, sem tentar keyword antes
 orquestrador run "<tarefa1>" "<tarefa2>" # roda várias tarefas independentes em paralelo
-orquestrador history                     # lista execuções passadas
+orquestrador history                     # lista execuções passadas (só do projeto atual, se houver .orquestradorrc por perto)
+orquestrador history --all               # ignora o filtro por projeto, mostra o histórico global
 orquestrador history --last              # mostra detalhes da última execução (com tokens/custo, se houver)
 orquestrador export <runId>              # relatório em markdown de um run (id completo ou prefixo de 8 chars)
 orquestrador export <runId> -o out.md    # escreve o relatório num arquivo em vez do stdout
 orquestrador                             # zero args: abre a tela interativa (Ink)
 orquestrador --no-mascot                 # idem, mas sem o pinguim ASCII (também dá pra alternar com /mascot dentro da tela)
 ```
+
+`.orquestradorrc` (JSON, opcional, na raiz de um projeto) configura
+`agent`/`routing`/`auto`/`maxRetries`/`retryBaseDelayMs`/`mascot` por
+projeto — ver Convenções abaixo pro discovery/precedência completos.
 
 ## Convenções
 
@@ -421,6 +426,84 @@ orquestrador --no-mascot                 # idem, mas sem o pinguim ASCII (també
     abrir a TUI não é um "comando" registrado nele, é o comportamento de
     fallback quando não há nenhum — registrar a flag lá exigiria também
     registrar um comando fantasma só pra ela existir.
+- **`package.json` pronto pra `npm publish`, mas nunca publicado de
+  verdade.** `files: ["dist"]` (não `.npmignore` — mais explícito, sem
+  dois mecanismos de exclusão sobrepostos pra manter sincronizados) exclui
+  `src/`, testes e config de build do pacote; validado com `npm pack
+  --dry-run` (37 arquivos, só `dist/`, `LICENSE`, `README.md`,
+  `package.json` — confirmado sem nada de `src/`). `prepublishOnly`
+  (`npm test && npm run build`) impede publicar sem a suíte passando.
+  `postbuild` já cuidava do bit de execução (bug #5); `files` cuida de não
+  vazar código-fonte/testes no pacote publicado. **Ninguém deve rodar
+  `npm publish` sem confirmação explícita** — isso é uma ação irreversível
+  (não dá pra "despublicar" uma versão do jeito que dá pra reverter um
+  commit).
+- **`.orquestradorrc` (config por projeto) segue o mesmo molde de
+  discovery do `CLAUDE.md` do Claude Code — implementado em `src/config.ts`,
+  novo módulo no topo de `src/`, não dentro de `orchestrator/`/`tui/`
+  porque é consumido por ambos (e pelo `cli.ts` direto).**
+  - `discoverProjectConfig(startDir)`: começa em `startDir` (default
+    `process.cwd()`), sobe um `dirname()` de cada vez até achar
+    `.orquestradorrc` ou `dirname(dir) === dir` (raiz do FS). Pega o
+    PRIMEIRO que encontrar — sem fusão de vários níveis (um
+    `.orquestradorrc` de monorepo na raiz e outro numa subpasta não se
+    combinam; o mais próximo do cwd simplesmente vence).
+  - `parseOrquestradorConfig(raw)`: valida CADA campo individualmente
+    (tipo E valor — `agent` precisa ser um `isAgentName()` de verdade,
+    `routing` só "keyword"/"classify", `maxRetries`/`retryBaseDelayMs`
+    inteiros positivos, `auto`/`mascot` booleanos) e descarta só o campo
+    ruim, com um aviso específico — nunca invalida o arquivo inteiro por
+    causa de UM campo errado, exceto quando o problema é estrutural (JSON
+    inválido, ou o nível mais alto não é um objeto).
+  - `resolveConfigValue(cliValue, projectValue)` = `cliValue ?? projectValue`
+    — parece trivial de propósito: o "default global" de cada campo já
+    está embutido mais embaixo (`options.routing ?? "keyword"` em
+    `pipeline.ts`, `maxRetries = DEFAULT_MAX_RETRIES` em
+    `agents/shared.ts`), então essa função só precisa decidir entre os
+    dois primeiros níveis e deixar `undefined` passar adiante quando
+    nenhum decidiu nada — não duplica uma tabela de defaults aqui.
+  - `maxRetries`/`retryBaseDelayMs` **não têm flag de CLI própria hoje** —
+    só `.orquestradorrc` ou o default global; por isso `resolveConfigValue`
+    nem é chamado pra esses dois em `cli.ts`, é só `cfg?.maxRetries` direto.
+  - Descoberta acontece **uma vez, no topo de `cli.ts`**, antes de
+    qualquer `program.command(...)`, e vale pra TODOS os comandos
+    (inclusive a TUI) — não é recalculada por comando. Avisos de campo
+    inválido aparecem sempre, mesmo em `history`/`export` (comandos que
+    nem usam `agent`/`routing`/etc.), porque um arquivo de config quebrado
+    vale a pena avisar de qualquer jeito.
+  - `retryBaseDelayMs` exigiu tornar o antigo `RETRY_BASE_DELAY_MS`
+    (constante hardcoded em `agents/shared.ts`) em `AgentRunOptions`/
+    `RunAgentCommandOptions.retryBaseDelayMs` (default
+    `DEFAULT_RETRY_BASE_DELAY_MS = 1000`), repassado pela mesma cadeia já
+    usada por `maxRetries` (wrappers → `pipeline.ts` → `agents/shared.ts`).
+  - Na TUI, `agent`/`routing`/`auto` **seedam o `ModeState` inicial**
+    (mesmo padrão de `--no-mascot` → `initialMascotEnabled`) — o usuário
+    ainda pode trocar depois com `/agent`/`/routing`/`/auto` durante a
+    sessão; o config só decide o PONTO DE PARTIDA, não trava a sessão
+    inteira. `maxRetries`/`retryBaseDelayMs` são diferentes: viram props
+    fixas (`App({ maxRetries, retryBaseDelayMs })`, repassadas direto pra
+    todo `runPipeline`/`runPipelines` da sessão) — não fazem parte de
+    `ModeState` porque não existe (nem foi pedido) um slash command pra
+    mudar isso em runtime.
+- **Histórico ganhou uma coluna `cwd` em `runs`** (não em `steps` — é uma
+  propriedade da EXECUÇÃO, não de cada etapa) — `startRun()` grava
+  `process.cwd()` no momento da chamada. `isWithinProjectScope(cwd,
+  projectRoot)` (`storage/history.ts`) é a definição canônica, pura, de
+  "esse run pertence a este projeto": `cwd === projectRoot` OU
+  `cwd.startsWith(projectRoot + sep)`. **Filtragem acontece em JS, não via
+  SQL `LIKE`** — decisão deliberada: um `LIKE` precisaria escapar `%`/`_`
+  dentro de um path real (raro, mas um bug esperando pra acontecer) pra
+  não bater em diretório errado; dado o volume de histórico esperado (uso
+  local/pessoal, não um serviço multi-usuário), buscar todos os `runs`
+  ordenados e filtrar+cortar em JS (`listRuns`) é mais simples e evita essa
+  categoria inteira de bug, sem custo real de performance nessa escala.
+  `listRuns`/`getLastRun` ganharam um segundo parâmetro opcional
+  (`{ projectRoot }`) — omitido, comportamento de sempre (histórico
+  global, sem filtro). `getRunById` (usado por `export`) **nunca** filtra
+  por projeto — recebe um id explícito, não haveria o que "limitar".
+  `cli.ts`'s `history` decide se filtra (`scopeToProject = !opts.all &&
+  projectConfig !== undefined`) e imprime um aviso claro quando filtra,
+  pra não parecer que o histórico "sumiu" silenciosamente.
 - **A partir de agora, trabalho por branch + PR, nunca commit direto na
   `main`.** Toda mudança nova nasce numa branch (`feature/...`), e ao
   terminar abro PR via `gh pr create` pra revisão.
@@ -541,7 +624,7 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
       cabeçalho `=== Tarefa i/N ===` por resultado conforme chegam).
       `printResult`/`printError` foram extraídas em `cli.ts` pra serem
       reaproveitadas pelos dois modos.
-- [x] Testes automatizados com Vitest (146 casos):
+- [x] Testes automatizados com Vitest (171 casos):
   - `src/tui/mascot.test.ts` (8 testes) — `mascotThinkingFrame` cicla pelos
     4 frames na ordem certa e dá a volta (wrap-around) depois do último em
     vez de `undefined`/travar (inclusive depois de várias voltas
@@ -576,7 +659,7 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
     `streamsIncrementally` reflete o probe manual documentado, `AGENT_NAMES`
     é derivado das chaves do registro, e `isAgentName` reconhece os dois
     agentes e rejeita nomes desconhecidos/variações de caixa.
-  - `src/agents/shared.test.ts` (7 testes) — `runAgentCommand` (retry com
+  - `src/agents/shared.test.ts` (8 testes) — `runAgentCommand` (retry com
     backoff): sucesso depois de 1 retry (com o `onRetry` recebendo
     `attempt`/`maxRetries`/`delayMs` corretos), sequência completa de
     backoff 1s/2s/4s até o sucesso na 4ª tentativa, esgotamento de
@@ -600,6 +683,9 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
     retry resolve em menos de 300ms mesmo com a outra presa no backoff de
     1s, e o tempo total do lote fica perto do delay de uma tarefa sozinha
     (~1s), não da soma das duas — confirma overlap real, não serialização.
+    O 8º teste confirma que `retryBaseDelayMs` customizado (vindo de um
+    `.orquestradorrc`, por exemplo) muda a base do backoff — `3000`/`6000`
+    em vez do padrão `1000`/`2000` — sem mexer no multiplicador exponencial.
   - `src/orchestrator/router.test.ts` — `planTask` (4 combinações de
     palavra-chave + case insensitivity), `classifyTaskWithClaude` (3
     classificações possíveis, falha da chamada, resposta inesperada), tudo
@@ -722,6 +808,31 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
     mostra a carinha confusa (`(? ?)`) junto da mensagem, cancelamento
     mostra a carinha neutra (`(- -)`), e com o mascote desligado nenhuma
     carinha aparece em lugar nenhum (nem a de pensando, nem a de reação).
+  - `src/config.test.ts` (18 testes) — `parseOrquestradorConfig` (config
+    completo válido, objeto vazio, JSON inválido, JSON que não é objeto,
+    cada campo validado e descartado independentemente com seu próprio
+    aviso — incluindo o caso de borda `maxRetries: 0` sendo válido enquanto
+    negativo/não-inteiro/string não são —, e múltiplos campos inválidos
+    simultâneos gerando um aviso por campo, não um genérico único),
+    `resolveConfigValue` (3 casos simples de precedência) e
+    `discoverProjectConfig` usando diretórios temporários DE VERDADE
+    (`mkdirSync`/`writeFileSync`/`rmSync` em `tmpdir()`, limpos no
+    `afterEach`): achado no diretório de partida, sobe diretórios até achar
+    o mais próximo (3 níveis aninhados), o mais próximo do cwd vence sobre
+    um mais acima sem fazer merge dos dois, devolve `undefined` subindo até
+    a raiz do FS quando não existe nenhum, e avisos de parsing propagando
+    através da descoberta.
+  - `src/storage/history.test.ts` (6 testes) — só a função pura
+    `isWithinProjectScope`: bate exato na raiz do projeto, bate num
+    descendente (inclusive vários níveis fundo), NÃO bate num diretório
+    irmão com prefixo parecido (`/projeto-outro` não é descendente de
+    `/projeto`), não bate num diretório pai nem num completamente não
+    relacionado, e `cwd` ausente (runs de antes da coluna existir) nunca
+    bate em nenhum projeto. Deliberadamente não cobre `listRuns`/
+    `getLastRun` filtrando de verdade via SQLite de ponta a ponta — mesma
+    lacuna de cobertura já documentada pra `storage/history.ts` em
+    "Pendências conhecidas"; validado manualmente (ver "Testado
+    manualmente" abaixo).
 - [x] Tela interativa (`src/tui/App.tsx` + `src/tui/startTui.tsx`, Ink/React):
       `orquestrador` sem argumentos abre um transcript rolável tipo chat —
       digita tarefa, roda via `runPipeline()`, mostra spinner e resultado;
@@ -880,6 +991,33 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
       tela. Sem carinha por tarefa no modo em lote (`;`) — decisão de
       escopo, ver Convenções. Arte só ASCII puro (sem Unicode largo), de
       propósito, pra não quebrar em terminal estreito.
+- [x] `package.json` pronto pra `npm publish` (mas ainda **não publicado**
+      de verdade): metadata completo (`name`, `version`, `description`,
+      `bin`, `license`, `repository`/`bugs`/`homepage` apontando pro
+      GitHub, `engines.node`, `keywords`, `author`), `files: ["dist"]`
+      restringindo o pacote publicado a só `dist/` (mais `package.json`/
+      `README.md`/`LICENSE`, incluídos sempre por padrão do npm) —
+      confirmado com `npm pack --dry-run` que nem `src/` nem testes vazam
+      no pacote. `prepublishOnly` (`npm test && npm run build`) barra
+      qualquer `npm publish` acidental sem a suíte passando antes.
+- [x] `.orquestradorrc` — config JSON opcional por projeto
+      (`src/config.ts`), descoberto subindo diretórios a partir do cwd
+      igual o `CLAUDE.md` do Claude Code (mais próximo do cwd vence, sem
+      merge entre níveis). Configura `agent`/`routing`/`auto`/
+      `maxRetries`/`retryBaseDelayMs`/`mascot`; cada campo validado
+      independentemente (campo ruim vira aviso específico e é descartado,
+      sem invalidar o arquivo inteiro). Precedência em `run`/TUI: flag de
+      CLI > `.orquestradorrc` > default global embutido mais embaixo
+      (`resolveConfigValue`, ver Convenções pro detalhe completo).
+      `maxRetries`/`retryBaseDelayMs` não têm flag de CLI própria — só
+      config ou default (decisão de escopo, ver Convenções).
+- [x] Histórico filtrado por projeto. Nova coluna `runs.cwd` (migração
+      pontual via `ensureColumn`, mesma técnica de `retries`/`usage`)
+      grava `process.cwd()` em todo `startRun()`. `history` (CLI) mostra
+      só as execuções do projeto atual quando existe um `.orquestradorrc`
+      por perto (`isWithinProjectScope`, `storage/history.ts`), com
+      `--all` pra ver o histórico completo de sempre. `export` **não** é
+      afetado — o id já identifica uma execução específica sem ambiguidade.
 
 Testado manualmente (chamando `agy`/`claude` reais do PATH, histórico de
 teste sempre limpo depois):
@@ -1033,6 +1171,26 @@ teste sempre limpo depois):
   projeto pra PTY — a primeira tentativa sem retry pareceu falhar, mas
   era só a flakiness de timing do pexpect já documentada aqui, não um bug:
   com retry, `/mascot` funcionou na primeira tentativa de verdade).
+- `.orquestradorrc` + histórico por projeto, com o CLI real (`dist/cli.js`)
+  rodando de dentro de um diretório temporário criado só pra esse teste:
+  um `.orquestradorrc` com `{"agent": "claude", "routing": "classify"}`
+  fez uma tarefa com keyword de pesquisa (que normalmente iria pro
+  antigravity) rodar no claude mesmo assim (config vencendo `planTask`);
+  `--agent antigravity` explícito na CLI venceu o config (precedência CLI
+  > config confirmada); `history` de dentro desse diretório mostrou só as
+  2 execuções feitas ali, escondendo uma 3ª execução feita de outro
+  diretório sem config; `history --all` mostrou as 3; `history --last`
+  devolveu a mais recente DAQUELE projeto, não a mais recente global.
+  Um campo inválido (`"agent": "gpt-5"`) produziu o aviso esperado no
+  stderr enquanto o `routing: "classify"` válido do mesmo arquivo
+  continuou sendo aplicado. Migração da coluna `cwd`: mesmo procedimento
+  já usado pra `usage` (banco criado manualmente sem a coluna) — dados
+  antigos continuaram legíveis, com a coluna adicionada silenciosamente.
+  TUI com PTY real: `.orquestradorrc` com `mascot: false` e
+  `agent: "claude"` abriu a tela já com o pinguim ausente e
+  `StatusLine` mostrando "agente: claude (forçado)" antes de qualquer
+  interação do usuário — confirmando o seeding do `ModeState` inicial a
+  partir do config.
 
 Cinco bugs reais encontrados e corrigidos durante o desenvolvimento:
 
@@ -1119,10 +1277,12 @@ Cinco bugs reais encontrados e corrigidos durante o desenvolvimento:
   em `getDb()`.
 - `agents/shared.ts` (`runAgentCommand`, incluindo o loop de retry) e
   `agents/claudeCode.ts` (parsing do envelope JSON/usage) têm teste
-  automatizado agora; `agents/antigravity.ts` (só monta `command`/`args`) e
-  o storage (`src/storage/history.ts`, incluindo `getRunById` — validado
-  só manualmente, ver "Testado manualmente") continuam sem cobertura
-  própria.
+  automatizado agora; `agents/antigravity.ts` (só monta `command`/`args`)
+  continua sem cobertura própria. O storage (`src/storage/history.ts`) tem
+  cobertura **parcial**: só a função pura `isWithinProjectScope` é testada
+  (`storage/history.test.ts`) — `listRuns`/`getLastRun` filtrando de
+  verdade via SQLite, `startRun` gravando `cwd`, e `getRunById`, continuam
+  validados só manualmente (ver "Testado manualmente").
 - `promptForAgent` (`src/cli.ts`) não tem teste automatizado (readline
   interativo é difícil de testar sem TTY real); a lógica de decisão que ele
   alimenta (`resolveAmbiguousAgent` no pipeline) está coberta.
@@ -1180,5 +1340,13 @@ Cinco bugs reais encontrados e corrigidos durante o desenvolvimento:
   configuração especulativa sem uso real. Sem carinha por tarefa no modo
   em lote (`;`) — decisão de escopo consciente, ver Convenções, não uma
   limitação técnica.
+- `.orquestradorrc`: só o arquivo mais próximo do cwd é considerado — um
+  monorepo com config na raiz e outro numa subpasta não faz merge dos
+  dois, o de baixo simplesmente vence por inteiro. `maxRetries`/
+  `retryBaseDelayMs` não têm flag de CLI própria (decisão de escopo, ver
+  Convenções) — hoje só dá pra configurar via arquivo. `export` é
+  deliberadamente não filtrado por projeto. E o pacote **ainda não foi
+  publicado no npm de verdade** — `package.json`/`npm pack --dry-run`
+  validados, mas nenhum `npm publish` foi executado.
 - Sem interface gráfica além da TUI de terminal, sem multi-tenant (fora de
   escopo do MVP).

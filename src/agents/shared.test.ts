@@ -75,6 +75,27 @@ describe("runAgentCommand — retry com backoff", () => {
     expect(result.retries?.map((r) => r.delayMs)).toEqual([1000, 2000, 4000]);
   });
 
+  it("retryBaseDelayMs customizado muda a base do backoff (ex.: .orquestradorrc pedindo um delay maior)", async () => {
+    mockedExeca
+      .mockReturnValueOnce(asExecaResult(failNonZero()))
+      .mockReturnValueOnce(asExecaResult(failNonZero()))
+      .mockReturnValueOnce(asExecaResult(ok("ok na terceira")));
+
+    vi.useFakeTimers();
+    const promise = runAgentCommand({
+      agent: "antigravity",
+      command: "agy",
+      args: ["-p", "x"],
+      prompt: "x",
+      maxRetries: 2,
+      retryBaseDelayMs: 3000,
+    });
+    await vi.runAllTimersAsync();
+    const result = await promise;
+
+    expect(result.retries?.map((r) => r.delayMs)).toEqual([3000, 6000]);
+  });
+
   it("esgota as tentativas e propaga o erro final com o histórico de retries", async () => {
     mockedExeca.mockImplementation(() => asExecaResult(failNonZero("continua falhando")));
 
