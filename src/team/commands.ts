@@ -63,7 +63,9 @@ export function registerTeamCommands(program: Command, config?: TeamConfig): voi
     .option("--plan <arquivo>", "Plano JSON explícito; não chama o coordenador para planejar")
     .option("-j, --concurrency <numero>", "Máximo de subtarefas simultâneas (1–12)")
     .option("--timeout <ms>", "Timeout por chamada de agente em milissegundos")
-    .action(async (task: string, opts: { agents?: string; planner?: string; plan?: string; concurrency?: string; timeout?: string }) => {
+    .option("--max-cost <usd>", "Interrompe a equipe ao atingir esse custo acumulado (só o claude reporta custo; ver README)")
+    .option("--max-duration <ms>", "Interrompe a equipe ao atingir esse tempo de parede total")
+    .action(async (task: string, opts: { agents?: string; planner?: string; plan?: string; concurrency?: string; timeout?: string; maxCost?: string; maxDuration?: string }) => {
       const controller = new AbortController();
       const cancel = () => { console.error("Cancelando equipe; preservando worktrees e resultados..."); controller.abort(); };
       try {
@@ -79,6 +81,9 @@ export function registerTeamCommands(program: Command, config?: TeamConfig): voi
           task, agents: names, planner: opts.planner && isAgentName(opts.planner) ? opts.planner : undefined,
           plan, concurrency: Number(opts.concurrency ?? config?.concurrency ?? 3), timeoutMs, signal: controller.signal,
           bootstrap: config?.bootstrap, bootstrapTimeoutMs: config?.bootstrapTimeoutMs,
+          budget: (opts.maxCost || opts.maxDuration)
+            ? { ...(opts.maxCost ? { maxCostUsd: Number(opts.maxCost) } : {}), ...(opts.maxDuration ? { maxDurationMs: Number(opts.maxDuration) } : {}) }
+            : undefined,
           onEvent: (event) => console.log(formatTeamEvent(event)),
         });
         console.log(`\n${renderTeamDashboard(result, true)}`);

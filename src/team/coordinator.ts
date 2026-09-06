@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { AGENT_REGISTRY } from "../agents/registry.js";
 import type { AgentName, AgentRunResult, AgentRunner } from "../types.js";
 import { createMailbox, queueUserMessage, TeamMailbox, writeJson, type TeamMessage } from "./mailbox.js";
+import { accumulate, budgetExceeded, validateBudget, type TeamBudget } from "./budget.js";
 import { createContractBoard, installContractHelper } from "./contracts.js";
 import { TeamStore } from "./persistence.js";
 import { runScheduled } from "../orchestrator/scheduler.js";
@@ -89,6 +90,8 @@ export interface TeamOptions {
   /** Comando sem shell executado antes de cada subtarefa, por exemplo ["npm", "ci"]. */
   bootstrap?: string[];
   bootstrapTimeoutMs?: number;
+  /** Tetos de custo e tempo para execução sem supervisão. Ver budget.ts. */
+  budget?: TeamBudget;
 }
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
@@ -116,6 +119,7 @@ export async function runTeam(options: TeamOptions): Promise<TeamState> {
     throw new Error("Timeout deve ser um inteiro positivo em ms.");
   }
   validateBootstrap(options.bootstrap, options.bootstrapTimeoutMs);
+  validateBudget(options.budget);
   const agents = options.agents ?? ["claude", "codex", "antigravity"];
   if (!agents.length || agents.some((name) => !Object.hasOwn(AGENT_REGISTRY, name))) throw new Error("Lista de agentes inválida.");
   let plan = options.plan ? parseTeamPlan(options.plan, agents) : undefined;
@@ -143,6 +147,8 @@ export async function runTeam(options: TeamOptions): Promise<TeamState> {
   let timer: ReturnType<typeof setInterval> | undefined;
   let mailbox: TeamMailbox | undefined;
   let pumpError: unknown;
+  const startedMs = Date.now();
+  let budgetStop: string | undefined;
   try {
     emit(`Equipe ${id}: ${directory}`);
     if (!plan) {
@@ -254,17 +260,34 @@ export async function runTeam(options: TeamOptions): Promise<TeamState> {
         task.status = outcome.status;
         if (outcome.status === "completed") {
           emit(`[${task.id}] concluída (${task.commit!.slice(0, 8)})`);
-          return;
+        } else {
+          task.error = outcome.status === "blocked"
+            ? "Uma dependência não foi concluída."
+            : message(outcome.error);
+          emit(`[${task.id}] ${task.status}: ${task.error}`);
         }
-        task.error = outcome.status === "blocked"
-          ? "Uma dependência não foi concluída."
-          : message(outcome.error);
-        emit(`[${task.id}] ${task.status}: ${task.error}`);
+        // Cada conclusão é o ponto natural de checagem: interromper no meio de
+        // uma chamada de modelo não devolveria o gasto, só perderia o resultado.
+        if (!budgetStop) {
+          const excedeu = budgetExceeded(
+            options.budget,
+            accumulate(state.tasks.map((t) => t.result), Date.now() - startedMs),
+          );
+          if (excedeu) {
+            budgetStop = excedeu;
+            emit(`${excedeu} Interrompendo; worktrees e resultados parciais preservados.`);
+            controller.abort();
+          }
+        }
       },
     });
     await mailbox.flush();
     if (pumpError) throw pumpError;
-    if (controller.signal.aborted) { state.status = "cancelled"; return state; }
+    if (controller.signal.aborted) {
+      state.status = "cancelled";
+      if (budgetStop) state.error = budgetStop;
+      return state;
+    }
 
     if (!state.tasks.some((t) => t.status === "completed")) { state.status = "failed"; return state; }
     state.status = "integrating";

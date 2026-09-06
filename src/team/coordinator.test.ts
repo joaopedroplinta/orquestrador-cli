@@ -100,6 +100,35 @@ describe("coordenador com Git real", () => {
     expect(readFileSync(join(repo, "base.txt"), "utf8")).toBe("base\n");
   });
 
+  // O guardrail do modo autônomo: sem teto, um plano ruim queima tempo e
+  // dinheiro até alguém perceber. O corte preserva o que já foi feito.
+  it("interrompe a equipe ao estourar o orçamento, preservando o trabalho concluído", async () => {
+    const { repo, directory } = await fixture();
+    const caro: AgentRunner = async (options) => ({
+      ...result("claude", options), usage: { costUsd: 5 },
+    });
+    const state = await runTeam({
+      task: "teste", cwd: repo, directory,
+      // Três tarefas independentes, teto que estoura já na primeira.
+      plan: { tasks: [
+        { id: "um", agent: "claude", task: "a", dependsOn: [] },
+        { id: "dois", agent: "claude", task: "b", dependsOn: [] },
+        { id: "tres", agent: "claude", task: "c", dependsOn: [] },
+      ] },
+      concurrency: 1,
+      budget: { maxCostUsd: 1 },
+      runners: { claude: caro, codex: unused, antigravity: unused },
+    });
+
+    expect(state.status).toBe("cancelled");
+    expect(state.error).toContain("Orçamento");
+    // A primeira concluiu de verdade; as demais foram canceladas sem rodar.
+    expect(state.tasks.filter((t) => t.status === "completed")).toHaveLength(1);
+    expect(state.tasks.filter((t) => t.status === "cancelled")).toHaveLength(2);
+    // Worktrees preservadas para inspeção, como em qualquer cancelamento.
+    expect(existsSync(state.tasks[0]!.worktree)).toBe(true);
+  });
+
   // Antes, o primeiro conflito fazia `return` e o trabalho das tarefas que
   // mergeariam limpo era perdido de vista. Agora a integração segue e só o
   // conflito real fica em aberto pra resolução manual.
