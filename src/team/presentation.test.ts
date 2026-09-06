@@ -11,7 +11,7 @@ const state: TeamState = {
     { id: "ui", agent: "claude", task: "Implementar formulário", dependsOn: ["api"], status: "blocked", worktree: "/ui", branch: "ui", error: "A dependência api não concluiu em um cenário simulado." },
   ],
   messages: [{ id: "m1", from: "api", to: "ui", text: "Contrato: POST /login retorna token", timestamp: "2026-01-01T00:00:01.000Z" }],
-  integration: { worktree: "/integration", branch: "orquestrador/test/integration", merged: ["api"] },
+  integration: { worktree: "/integration", branch: "orquestrador/test/integration", merged: ["api"], conflicts: [], failed: [] },
 };
 
 describe("painel de equipe", () => {

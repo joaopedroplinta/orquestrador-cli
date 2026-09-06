@@ -575,7 +575,7 @@ describe("Equipe na TUI", () => {
         worktree: "/teams/api", branch: "orquestrador/api", commit: "abc",
       }],
       messages: [],
-      integration: { worktree: "/teams/integration", branch: "orquestrador/integration", merged: ["api"] },
+      integration: { worktree: "/teams/integration", branch: "orquestrador/integration", merged: ["api"], conflicts: [], failed: [] },
     };
 
     const { lastFrame, stdin } = render(<App />);

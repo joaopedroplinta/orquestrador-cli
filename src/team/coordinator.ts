@@ -44,7 +44,17 @@ export interface TeamState {
   tasks: TaskState[];
   messages: TeamMessage[];
   plannerResult?: AgentRunResult;
-  integration?: { worktree: string; branch: string; merged: string[]; conflictTask?: string };
+  integration?: {
+    worktree: string;
+    branch: string;
+    merged: string[];
+    /** Primeira tarefa conflitante — mantido para compatibilidade de leitura. */
+    conflictTask?: string;
+    /** Todas as tarefas que conflitaram, com os arquivos disputados. */
+    conflicts: Array<{ task: string; files: string[] }>;
+    /** Tarefas que falharam ao integrar por outro motivo que não conflito. */
+    failed: Array<{ task: string; error: string }>;
+  };
   error?: string;
 }
 export interface TeamCleanupResult {
@@ -253,7 +263,12 @@ export async function runTeam(options: TeamOptions): Promise<TeamState> {
     if (!state.tasks.some((t) => t.status === "completed")) { state.status = "failed"; return state; }
     state.status = "integrating";
     await store.saveNow(state);
-    const integration = { worktree: join(directory, "integration"), branch: `orquestrador/${id}/integration`, merged: [] as string[], conflictTask: undefined as string | undefined };
+    const integration = {
+      worktree: join(directory, "integration"), branch: `orquestrador/${id}/integration`,
+      merged: [] as string[], conflictTask: undefined as string | undefined,
+      conflicts: [] as Array<{ task: string; files: string[] }>,
+      failed: [] as Array<{ task: string; error: string }>,
+    };
     state.integration = integration;
     await createWorktree(root, integration.worktree, integration.branch, base);
     emit("Integrando resultados em uma worktree separada...");
@@ -266,13 +281,47 @@ export async function runTeam(options: TeamOptions): Promise<TeamState> {
         integration.merged.push(task.id);
         save();
       } catch (error) {
-        const conflicts = await git(integration.worktree, ["diff", "--name-only", "--diff-filter=U"]);
-        integration.conflictTask = conflicts ? task.id : undefined;
-        state.status = conflicts ? "conflict" : "failed";
-        state.error = message(error);
-        emit(`Integração interrompida em ${task.id} (${state.status}). Verifique ${integration.worktree}.`);
-        return state;
+        // Um conflito NÃO descarta a integração inteira: as demais tarefas
+        // ainda mergeiam limpo e o trabalho delas entra na branch. Antes, o
+        // primeiro conflito fazia return e todo o resto era perdido de vista.
+        const unresolved = await git(integration.worktree, ["diff", "--name-only", "--diff-filter=U"]);
+        if (unresolved) {
+          // Desfaz só esta merge pra worktree seguir mergeável para as próximas.
+          await git(integration.worktree, ["merge", "--abort"]).catch(() => undefined);
+          integration.conflicts.push({ task: task.id, files: unresolved.split("\n").filter(Boolean) });
+          integration.conflictTask ??= task.id;
+          emit(`Conflito ao integrar ${task.id} (${unresolved.split("\n").filter(Boolean).length} arquivo(s)); seguindo com as demais.`);
+        } else {
+          integration.failed.push({ task: task.id, error: message(error) });
+          emit(`Falha ao integrar ${task.id}: ${message(error)}`);
+        }
+        save();
       }
+    }
+    // Segunda passagem: com tudo que fechava limpo já integrado, reencena o
+    // primeiro conflito e o DEIXA em aberto na worktree. Assim a branch ganha
+    // o máximo de trabalho possível (o que a primeira passagem resolve) e você
+    // ainda encontra um conflito real, atual, pronto pra resolver na mão.
+    if (integration.conflictTask) {
+      const pendente = state.tasks.find((t) => t.id === integration.conflictTask)!;
+      await mergeCommit(integration.worktree, pendente.commit!).catch(() => undefined);
+    }
+
+    if (integration.conflicts.length || integration.failed.length) {
+      state.status = integration.conflicts.length ? "conflict" : "failed";
+      state.error = [
+        integration.conflicts.length
+          ? `Conflito em: ${integration.conflicts.map((c) => `${c.task} (${c.files.join(", ")})`).join("; ")}`
+          : undefined,
+        integration.failed.length
+          ? `Falha ao integrar: ${integration.failed.map((f) => `${f.task}: ${f.error}`).join("; ")}`
+          : undefined,
+        integration.merged.length
+          ? `Integradas mesmo assim: ${integration.merged.join(", ")}`
+          : "Nenhuma tarefa pôde ser integrada.",
+      ].filter(Boolean).join(" | ");
+      emit(`Integração parcial: ${integration.merged.length} de ${integration.merged.length + integration.conflicts.length + integration.failed.length}. Verifique ${integration.worktree}.`);
+      return state;
     }
     state.status = state.tasks.every((t) => t.status === "completed") ? "completed" : "partial";
     emit(`Equipe ${state.status}. Resultado: ${integration.branch}`);

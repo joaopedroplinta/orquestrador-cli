@@ -100,6 +100,41 @@ describe("coordenador com Git real", () => {
     expect(readFileSync(join(repo, "base.txt"), "utf8")).toBe("base\n");
   });
 
+  // Antes, o primeiro conflito fazia `return` e o trabalho das tarefas que
+  // mergeariam limpo era perdido de vista. Agora a integração segue e só o
+  // conflito real fica em aberto pra resolução manual.
+  it("integra as tarefas que fecham limpo mesmo quando outra conflita", async () => {
+    const { repo, directory } = await fixture();
+    // api e ui disputam base.txt; solo escreve num arquivo só dele.
+    const disputa = (agent: AgentName): AgentRunner => async (options) => {
+      writeFileSync(join(options.cwd!, "base.txt"), `${agent}\n`);
+      return result(agent, options);
+    };
+    const isolada: AgentRunner = async (options) => {
+      writeFileSync(join(options.cwd!, "solo.txt"), "sozinho\n");
+      return result("antigravity", options);
+    };
+    const state = await runTeam({
+      task: "teste", cwd: repo, directory,
+      plan: { tasks: [
+        { id: "api", agent: "codex", task: "API", dependsOn: [] },
+        { id: "ui", agent: "claude", task: "UI", dependsOn: [] },
+        { id: "solo", agent: "antigravity", task: "isolada", dependsOn: [] },
+      ] },
+      runners: { codex: disputa("codex"), claude: disputa("claude"), antigravity: isolada },
+    });
+
+    expect(state.status).toBe("conflict");
+    // A tarefa sem conflito entrou na branch de integração em vez de sumir.
+    expect(state.integration?.merged).toContain("solo");
+    expect(existsSync(join(state.integration!.worktree, "solo.txt"))).toBe(true);
+    // E o conflito real continua em aberto na worktree, pra resolver na mão.
+    expect(state.integration?.conflicts.map((c) => c.task)).toEqual(["ui"]);
+    expect(state.integration?.conflicts[0]?.files).toEqual(["base.txt"]);
+    expect(await git(state.integration!.worktree, ["diff", "--name-only", "--diff-filter=U"])).toBe("base.txt");
+    expect(readFileSync(join(repo, "base.txt"), "utf8")).toBe("base\n");
+  });
+
   it("cancela processos ativos sem iniciar tarefas pendentes", async () => {
     const { repo, directory } = await fixture();
     const controller = new AbortController();
