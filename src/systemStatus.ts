@@ -42,6 +42,20 @@ export async function checkCli(command: string, args: string[] = ["--version"]):
   }
 }
 
+/**
+ * Só responde se o diretório está sob controle de versão — usado para decidir
+ * se vale avisar sobre edição concorrente sem isolamento (fora de um repo não
+ * há worktree pra oferecer como alternativa).
+ */
+export async function isGitRepository(cwd: string = process.cwd()): Promise<boolean> {
+  try {
+    await execa("git", ["rev-parse", "--git-dir"], { cwd, timeout: 2000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function getGitBranch(cwd: string = process.cwd()): Promise<string | null> {
   try {
     const { stdout } = await execa("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd, timeout: 2000 });

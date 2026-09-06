@@ -137,17 +137,28 @@ export async function runTeam(options: TeamOptions): Promise<TeamState> {
       plan = parsePlannerOutput(state.plannerResult.output, agents);
     }
     const endpoints = new Map<string, string>();
+    controller.signal.throwIfAborted();
+    const members = plan.tasks.map((task) => task.id);
+    // Cada worktree é um checkout completo; em série, 12 subtarefas num repo
+    // grande são minutos de espera antes do primeiro agente ver um token.
+    // `git worktree add` cria uma ref própria por tarefa (locks independentes),
+    // então paralelizar é seguro. Sem teto de propósito: o plano é limitado a
+    // 12 subtarefas, então o pico é conhecido e pequeno.
+    const prepared = await Promise.all(
+      plan.tasks.map(async (task) => {
+        const worktree = join(directory, task.id);
+        const branch = `orquestrador/${id}/${task.id}`;
+        await createWorktree(root, worktree, branch, base);
+        return { task, worktree, branch };
+      }),
+    );
     // Inicializa todas as caixas antes de iniciar processos: mensagens para tarefas
     // ainda pendentes ficam disponíveis quando elas começarem.
-    for (const task of plan.tasks) {
-      controller.signal.throwIfAborted();
-      const worktree = join(directory, task.id);
-      const branch = `orquestrador/${id}/${task.id}`;
-      await createWorktree(root, worktree, branch, base);
+    for (const { task, worktree, branch } of prepared) {
       state.tasks.push({ ...task, worktree, branch, status: "pending" });
-      endpoints.set(task.id, createMailbox(worktree, plan.tasks.map((task) => task.id)));
-      save();
+      endpoints.set(task.id, createMailbox(worktree, members));
     }
+    save();
     const userDirectory = join(directory, "user");
     endpoints.set("user", createMailbox(userDirectory, plan.tasks.map((task) => task.id)));
     mailbox = new TeamMailbox(endpoints, (m) => emit(`[mensagem ${m.from} → ${m.to}] ${m.text}`));
