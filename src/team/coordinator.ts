@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { AGENT_REGISTRY } from "../agents/registry.js";
 import type { AgentName, AgentRunResult, AgentRunner } from "../types.js";
 import { createMailbox, queueUserMessage, TeamMailbox, writeJson, type TeamMessage } from "./mailbox.js";
+import { createContractBoard, installContractHelper } from "./contracts.js";
 import { TeamStore } from "./persistence.js";
 import { runScheduled } from "../orchestrator/scheduler.js";
 import { parsePlannerOutput, parseTeamPlan, plannerPrompt, type TeamPlan, type TeamTask } from "./plan.js";
@@ -172,9 +173,11 @@ export async function runTeam(options: TeamOptions): Promise<TeamState> {
     );
     // Inicializa todas as caixas antes de iniciar processos: mensagens para tarefas
     // ainda pendentes ficam disponíveis quando elas começarem.
+    createContractBoard(directory);
     for (const { task, worktree, branch } of prepared) {
       state.tasks.push({ ...task, worktree, branch, status: "pending" });
       endpoints.set(task.id, createMailbox(worktree, members));
+      installContractHelper(worktree, directory, task.id);
     }
     save();
     const userDirectory = join(directory, "user");
@@ -214,6 +217,9 @@ export async function runTeam(options: TeamOptions): Promise<TeamState> {
             'Envie mensagens durante o trabalho: node .orquestrador-team/mailbox.cjs send <id|all|user> "mensagem"',
             "Consulte as mensagens no início, antes de decisões de interface, entre etapas e antes de concluir: node .orquestrador-team/mailbox.cjs inbox",
             "Combine contratos e avise mudanças aos colegas. Mensagens não copiam arquivos. Não espere indefinidamente por respostas; registre bloqueios.",
+            "Decisões que outros precisam respeitar (rotas, formato de payload, nomes de tabela) vão no quadro de contratos, não só em mensagem:",
+            '  consultar: node .orquestrador-team/contracts.cjs list  ·  registrar: node .orquestrador-team/contracts.cjs set <chave> "<valor>"',
+            "Consulte o quadro ANTES de definir qualquer interface. Se sua escrita for recusada, a chave já tem dono: leia o valor atual e adeque-se a ele em vez de divergir.",
             "Execute verificações pertinentes e finalize com resumo, arquivos alterados, testes e pendências. Dependências de pacotes não são copiadas da árvore original.",
           ].join("\n\n"),
           context: dependencies.length ? dependencies.map((d) => `[${d.id}]\n${d.result!.output}`).join("\n\n") : undefined,
