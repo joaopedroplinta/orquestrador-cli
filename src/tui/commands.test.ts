@@ -42,6 +42,14 @@ describe("parseInput", () => {
     expect(parseInput("/team").kind).toBe("error");
   });
 
+  it("/team aceita agentes e concorrência antes da tarefa", () => {
+    expect(parseInput("/team --agents codex,claude --concurrency 2 implementar Login")).toEqual({
+      kind: "team", task: "implementar Login", agents: ["codex", "claude"], concurrency: 2,
+    });
+    expect(parseInput("/team --agents codex,codex implementar").kind).toBe("error");
+    expect(parseInput("/team --concurrency 0 implementar").kind).toBe("error");
+  });
+
   it("/help vira help", () => {
     expect(parseInput("/help")).toEqual({ kind: "help" });
   });

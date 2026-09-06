@@ -5,6 +5,16 @@ import type { AgentName, RoutingStrategy } from "./types.js";
 
 export const CONFIG_FILENAME = ".orquestradorrc";
 
+export interface TeamConfig {
+  /** Agentes disponíveis para `team run` quando a flag --agents não for usada. */
+  agents?: AgentName[];
+  concurrency?: number;
+  timeoutMs?: number;
+  /** Programa e argumentos, sem shell, executados em cada worktree antes do agente. */
+  bootstrap?: string[];
+  bootstrapTimeoutMs?: number;
+}
+
 /** Tudo opcional — cada projeto configura só o que quiser sobrescrever do default global. */
 export interface OrquestradorConfig {
   /** Equivalente a --agent: força esse agente pra toda tarefa rodada neste projeto. */
@@ -17,6 +27,8 @@ export interface OrquestradorConfig {
   maxRetries?: number;
   /** Base do backoff exponencial em ms. */
   retryBaseDelayMs?: number;
+  /** Defaults do modo `team`. */
+  team?: TeamConfig;
 }
 
 function isRoutingStrategyValue(value: unknown): value is RoutingStrategy {
@@ -65,6 +77,35 @@ export function parseOrquestradorConfig(raw: string): { config: OrquestradorConf
       config.retryBaseDelayMs = obj.retryBaseDelayMs;
     } else {
       warnings.push(`"retryBaseDelayMs": ${JSON.stringify(obj.retryBaseDelayMs)} inválido (use um inteiro > 0) — ignorado.`);
+    }
+  }
+  if ("team" in obj) {
+    if (typeof obj.team !== "object" || obj.team === null || Array.isArray(obj.team)) {
+      warnings.push('"team" inválido (use um objeto) — ignorado.');
+    } else {
+      const team = obj.team as Record<string, unknown>;
+      const parsedTeam: TeamConfig = {};
+      if ("agents" in team) {
+        if (Array.isArray(team.agents) && team.agents.length > 0 && team.agents.length <= 3
+          && team.agents.every((agent) => typeof agent === "string" && isAgentName(agent))
+          && new Set(team.agents).size === team.agents.length) {
+          parsedTeam.agents = team.agents as AgentName[];
+        } else warnings.push('"team.agents" inválido (use uma lista sem repetição de claude, antigravity e/ou codex) — ignorado.');
+      }
+      for (const [key, target] of [["concurrency", "concurrency"], ["timeoutMs", "timeoutMs"], ["bootstrapTimeoutMs", "bootstrapTimeoutMs"]] as const) {
+        const value = team[key];
+        if (!(key in team)) continue;
+        if (typeof value === "number" && Number.isSafeInteger(value) && value > 0 && (key !== "concurrency" || value <= 12)) {
+          parsedTeam[target] = value;
+        } else warnings.push(`"team.${key}" inválido (use ${key === "concurrency" ? "um inteiro entre 1 e 12" : "um inteiro positivo"}) — ignorado.`);
+      }
+      if ("bootstrap" in team) {
+        if (Array.isArray(team.bootstrap) && team.bootstrap.length > 0 && team.bootstrap.length <= 32
+          && team.bootstrap.every((part) => typeof part === "string" && part.trim().length > 0 && !part.includes("\0"))) {
+          parsedTeam.bootstrap = team.bootstrap as string[];
+        } else warnings.push('"team.bootstrap" inválido (use uma lista não vazia de argumentos) — ignorado.');
+      }
+      if (Object.keys(parsedTeam).length > 0) config.team = parsedTeam;
     }
   }
   return { config, warnings };

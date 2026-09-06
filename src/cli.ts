@@ -10,6 +10,7 @@ import { discoverProjectConfig, resolveConfigValue } from "./config.js";
 import { runPipeline, runPipelines, type PipelineResult } from "./orchestrator/pipeline.js";
 import { buildMarkdownReport, formatUsdCost, totalCostUsd, usageLine } from "./reporting.js";
 import { getLastRun, getRunById, listRuns } from "./storage/history.js";
+import { getSystemStatus } from "./systemStatus.js";
 import {
   AgentError,
   PipelineCancelledError,
@@ -308,5 +309,22 @@ program
     }
   });
 
-registerTeamCommands(program);
+program
+  .command("doctor")
+  .description("Verifica CLIs, Git, Node e a prontidão local para iniciar uma equipe")
+  .action(async () => {
+    const status = await getSystemStatus();
+    console.log(chalk.bold("Diagnóstico do Orquestrador"));
+    console.log(`Node: ${status.nodeVersion}`);
+    console.log(status.gitBranch
+      ? `Git: ${chalk.green(`branch ${status.gitBranch}`)} · ${status.gitClean ? chalk.green("limpo") : chalk.yellow("com alterações")}`
+      : chalk.red("Git: não é um repositório"));
+    for (const [name, health] of [["claude", status.claude], ["agy", status.antigravity], ["codex", status.codex]] as const) {
+      console.log(`${health.installed ? chalk.green("✔") : chalk.red("✖")} ${name}${health.version ? `: ${health.version}` : `: ${health.error}`}`);
+    }
+    console.log(chalk.dim("O diagnóstico confirma executáveis e Git; autenticação só é confirmada na primeira chamada do agente."));
+    if (!status.gitBranch || !status.gitClean) process.exitCode = 1;
+  });
+
+registerTeamCommands(program, projectConfig?.config.team);
 program.parseAsync(process.argv);

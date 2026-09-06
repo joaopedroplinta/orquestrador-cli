@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkCli, getGitBranch, getSystemStatus } from "./systemStatus.js";
+import { checkCli, getGitBranch, getSystemStatus, isGitClean } from "./systemStatus.js";
 
 describe("systemStatus", () => {
   it("checkCli identifica comandos existentes como node", async () => {
@@ -19,10 +19,16 @@ describe("systemStatus", () => {
     expect(typeof branch === "string" || branch === null).toBe(true);
   });
 
+  it("isGitClean retorna boolean ou null fora de um repositório", async () => {
+    const clean = await isGitClean();
+    expect(typeof clean === "boolean" || clean === null).toBe(true);
+  });
+
   it("getSystemStatus retorna objeto completo com status", async () => {
     const status = await getSystemStatus();
     expect(status.projectName).toBeDefined();
     expect(status.nodeVersion).toBe(process.version);
+    expect(typeof status.gitClean === "boolean" || status.gitClean === null).toBe(true);
     expect(typeof status.historyRunsCount).toBe("number");
     expect(typeof status.codex.installed).toBe("boolean");
     expect(typeof status.claude.installed).toBe("boolean");

@@ -1,12 +1,22 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { AGENT_REGISTRY } from "../agents/registry.js";
 import type { AgentName, AgentRunResult, AgentRunner } from "../types.js";
 import { createMailbox, queueUserMessage, TeamMailbox, writeJson, type TeamMessage } from "./mailbox.js";
+import { TeamStore } from "./persistence.js";
 import { parsePlannerOutput, parseTeamPlan, plannerPrompt, type TeamPlan, type TeamTask } from "./plan.js";
-import { checkpoint, createWorktree, git, inspectRepository, mergeCommit } from "./worktrees.js";
+import {
+  checkpoint,
+  createWorktree,
+  deleteBranch,
+  git,
+  inspectRepository,
+  mergeCommit,
+  removeWorktree,
+  worktreeChanges,
+} from "./worktrees.js";
 
 export const DEFAULT_TEAM_DIRECTORY = join(homedir(), ".orquestrador", "teams");
 export interface TaskState extends TeamTask {
@@ -26,11 +36,22 @@ export interface TeamState {
   status: "planning" | "running" | "integrating" | "completed" | "partial" | "failed" | "cancelled" | "conflict";
   startedAt: string;
   finishedAt?: string;
+  /** PID do processo que iniciou a equipe; usado só para detectar estado interrompido. */
+  ownerPid?: number;
+  recoveredAt?: string;
+  cleanup?: TeamCleanupResult;
   tasks: TaskState[];
   messages: TeamMessage[];
   plannerResult?: AgentRunResult;
   integration?: { worktree: string; branch: string; merged: string[]; conflictTask?: string };
   error?: string;
+}
+export interface TeamCleanupResult {
+  finishedAt: string;
+  removedWorktrees: string[];
+  skippedWorktrees: Array<{ path: string; reason: string }>;
+  deletedBranches: string[];
+  skippedBranches: Array<{ branch: string; reason: string }>;
 }
 export interface TeamOptions {
   task: string;
@@ -45,9 +66,27 @@ export interface TeamOptions {
   onEvent?: (event: string) => void;
   /** Injeção dos adaptadores permite testar concorrência e Git real sem chamar modelos. */
   runners?: Record<AgentName, AgentRunner>;
+  /** Comando sem shell executado antes de cada subtarefa, por exemplo ["npm", "ci"]. */
+  bootstrap?: string[];
+  bootstrapTimeoutMs?: number;
 }
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+
+function validateBootstrap(command: string[] | undefined, timeoutMs: number | undefined): void {
+  if (command && (!command.length || command.some((part) => !part.trim() || part.includes("\0")))) {
+    throw new Error("Bootstrap inválido: use uma lista não vazia de argumentos sem caracteres nulos.");
+  }
+  if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1)) {
+    throw new Error("Timeout do bootstrap deve ser um inteiro positivo em ms.");
+  }
+}
+
+async function bootstrapWorktree(path: string, command: string[] | undefined, timeoutMs: number): Promise<void> {
+  if (!command) return;
+  const { execa } = await import("execa");
+  await execa(command[0]!, command.slice(1), { cwd: path, timeout: timeoutMs, stdio: "inherit" });
+}
 
 export async function runTeam(options: TeamOptions): Promise<TeamState> {
   const concurrency = options.concurrency ?? 3;
@@ -56,6 +95,7 @@ export async function runTeam(options: TeamOptions): Promise<TeamState> {
   if (options.timeoutMs !== undefined && (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1)) {
     throw new Error("Timeout deve ser um inteiro positivo em ms.");
   }
+  validateBootstrap(options.bootstrap, options.bootstrapTimeoutMs);
   const agents = options.agents ?? ["claude", "codex", "antigravity"];
   if (!agents.length || agents.some((name) => !Object.hasOwn(AGENT_REGISTRY, name))) throw new Error("Lista de agentes inválida.");
   let plan = options.plan ? parseTeamPlan(options.plan, agents) : undefined;
@@ -66,9 +106,15 @@ export async function runTeam(options: TeamOptions): Promise<TeamState> {
   const id = randomUUID();
   const directory = join(options.directory ?? DEFAULT_TEAM_DIRECTORY, id);
   mkdirSync(directory, { recursive: true });
-  const state: TeamState = { id, task: options.task, root, base, directory, status: "planning", startedAt: new Date().toISOString(), tasks: [], messages: [] };
-  const save = () => writeJson(join(directory, "state.json"), state);
-  const emit = (event: string) => { save(); options.onEvent?.(event); };
+  const state: TeamState = {
+    id, task: options.task, root, base, directory, status: "planning", startedAt: new Date().toISOString(), ownerPid: process.pid, tasks: [], messages: [],
+  };
+  // Snapshot com debounce + log de eventos append-only, ambos assíncronos: o
+  // caminho quente (uma mensagem de mailbox entregue) não pode reserializar o
+  // estado inteiro de forma síncrona. Ver TeamStore em persistence.ts.
+  const store = new TeamStore(directory);
+  const save = () => store.save(state);
+  const emit = (event: string) => { store.appendEvent(event); save(); options.onEvent?.(event); };
   const runner = (agent: AgentName) => options.runners?.[agent] ?? AGENT_REGISTRY[agent].runner;
   const controller = new AbortController();
   const abort = () => controller.abort();
@@ -108,8 +154,11 @@ export async function runTeam(options: TeamOptions): Promise<TeamState> {
     state.messages = mailbox.messages;
     state.status = "running";
     emit(`Executando ${state.tasks.length} subtarefas, até ${concurrency} simultâneas.`);
+    // Durável antes de qualquer agente começar: `team send` de outro terminal
+    // lê o status do disco e precisa ver "running" já na primeira mensagem.
+    await store.saveNow(state);
     timer = setInterval(() => {
-      try { mailbox!.flush(); } catch (error) { pumpError = error; controller.abort(); }
+      void mailbox!.flush().catch((error: unknown) => { pumpError = error; controller.abort(); });
     }, 200);
 
     const execute = async (task: TaskState) => {
@@ -118,6 +167,11 @@ export async function runTeam(options: TeamOptions): Promise<TeamState> {
       try {
         const dependencies = task.dependsOn.map((id) => state.tasks.find((task) => task.id === id)!);
         for (const dependency of dependencies) await mergeCommit(task.worktree, dependency.commit!);
+        controller.signal.throwIfAborted();
+        if (options.bootstrap) {
+          emit(`[${task.id}] preparando dependências...`);
+          await bootstrapWorktree(task.worktree, options.bootstrap, options.bootstrapTimeoutMs ?? options.timeoutMs ?? 300_000);
+        }
         controller.signal.throwIfAborted();
         task.result = await runner(task.agent)({
           cwd: task.worktree, signal: controller.signal, timeoutMs: options.timeoutMs ?? 300_000, maxRetries: 0,
@@ -135,7 +189,7 @@ export async function runTeam(options: TeamOptions): Promise<TeamState> {
           context: dependencies.length ? dependencies.map((d) => `[${d.id}]\n${d.result!.output}`).join("\n\n") : undefined,
         });
         controller.signal.throwIfAborted();
-        mailbox!.flush();
+        await mailbox!.flush();
         task.commit = await checkpoint(task.worktree, task.id);
         task.status = "completed";
         emit(`[${task.id}] concluída (${task.commit.slice(0, 8)})`);
@@ -159,12 +213,13 @@ export async function runTeam(options: TeamOptions): Promise<TeamState> {
       }
       if (running.size) await Promise.race(running.values());
     }
-    mailbox.flush();
+    await mailbox.flush();
     if (pumpError) throw pumpError;
     if (controller.signal.aborted) { state.status = "cancelled"; return state; }
 
     if (!state.tasks.some((t) => t.status === "completed")) { state.status = "failed"; return state; }
     state.status = "integrating";
+    await store.saveNow(state);
     const integration = { worktree: join(directory, "integration"), branch: `orquestrador/${id}/integration`, merged: [] as string[], conflictTask: undefined as string | undefined };
     state.integration = integration;
     await createWorktree(root, integration.worktree, integration.branch, base);
@@ -204,13 +259,119 @@ export async function runTeam(options: TeamOptions): Promise<TeamState> {
     if (timer) clearInterval(timer);
     options.signal?.removeEventListener("abort", abort);
     state.finishedAt = new Date().toISOString();
+    // Único ponto que espera o disco de verdade: garante que `state.json`
+    // reflita o resultado final antes de `runTeam` retornar, apesar do
+    // debounce usado durante a execução.
     save();
+    await store.flush();
   }
 }
 
 export function readTeam(id: string, directory = DEFAULT_TEAM_DIRECTORY): TeamState {
   if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error("Id de equipe inválido.");
   return JSON.parse(readFileSync(join(directory, id, "state.json"), "utf8")) as TeamState;
+}
+
+const ACTIVE_TEAM_STATUSES = new Set<TeamState["status"]>(["planning", "running", "integrating"]);
+
+export function isTeamInterrupted(state: TeamState): boolean {
+  if (!ACTIVE_TEAM_STATUSES.has(state.status)) return false;
+  if (!state.ownerPid) return true; // estados gravados por versões anteriores não tinham PID.
+  try {
+    process.kill(state.ownerPid, 0);
+    return false;
+  } catch (error) {
+    return !(error instanceof Error && "code" in error && error.code === "EPERM");
+  }
+}
+
+export function listTeams(directory = DEFAULT_TEAM_DIRECTORY): TeamState[] {
+  if (!existsSync(directory)) return [];
+  return readdirSync(directory)
+    .filter((id) => /^[a-f0-9-]{36}$/.test(id))
+    .flatMap((id) => {
+      try { return [readTeam(id, directory)]; } catch { return []; }
+    })
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+}
+
+/**
+ * Um processo morto não pode ter suas chamadas de agente retomadas com
+ * segurança. Recuperar torna o registro terminal e preserva todas as
+ * worktrees para inspeção, nova tentativa manual ou cleanup explícito.
+ */
+export function recoverTeam(id: string, directory = DEFAULT_TEAM_DIRECTORY): TeamState {
+  const state = readTeam(id, directory);
+  if (!ACTIVE_TEAM_STATUSES.has(state.status)) return state;
+  if (!isTeamInterrupted(state)) throw new Error("A equipe ainda está em execução; não é seguro recuperá-la agora.");
+  for (const task of state.tasks) {
+    if (task.status === "pending" || task.status === "running") {
+      task.status = "cancelled";
+      task.error = "Execução interrompida antes da conclusão; worktree preservada para inspeção.";
+    }
+  }
+  state.status = "cancelled";
+  state.error = "Execução interrompida; os processos de agente não são retomados automaticamente.";
+  state.finishedAt = new Date().toISOString();
+  state.recoveredAt = state.finishedAt;
+  writeJson(join(directory, id, "state.json"), state);
+  return state;
+}
+
+function cleanupTargets(state: TeamState): Array<{ path: string; branch: string }> {
+  const validTask = (task: TaskState) => /^[a-z][a-z0-9-]{0,39}$/.test(task.id);
+  if (!/^[a-f0-9-]{36}$/.test(state.id) || !state.tasks.every(validTask)) {
+    throw new Error("Estado de equipe inválido para limpeza.");
+  }
+  const expected = (name: string) => join(state.directory, name);
+  const targets = [
+    { path: expected("planner"), branch: `orquestrador/${state.id}/planner` },
+    ...state.tasks.map((task) => ({ path: expected(task.id), branch: `orquestrador/${state.id}/${task.id}` })),
+  ];
+  if (state.integration) targets.push({ path: expected("integration"), branch: `orquestrador/${state.id}/integration` });
+  return targets;
+}
+
+export async function cleanupTeam(
+  id: string,
+  options: { directory?: string; force?: boolean; deleteBranches?: boolean } = {},
+): Promise<TeamCleanupResult> {
+  const directory = options.directory ?? DEFAULT_TEAM_DIRECTORY;
+  const state = readTeam(id, directory);
+  if (ACTIVE_TEAM_STATUSES.has(state.status)) {
+    throw new Error(isTeamInterrupted(state)
+      ? "A equipe foi interrompida. Rode `team recover <id>` antes de limpar as worktrees."
+      : "A equipe ainda está em execução; não é seguro limpar as worktrees.");
+  }
+
+  const result: TeamCleanupResult = { finishedAt: new Date().toISOString(), removedWorktrees: [], skippedWorktrees: [], deletedBranches: [], skippedBranches: [] };
+  for (const target of cleanupTargets(state)) {
+    if (!existsSync(target.path)) continue;
+    try {
+      const changes = await worktreeChanges(target.path);
+      if (changes.length && !options.force) {
+        result.skippedWorktrees.push({ path: target.path, reason: `há alterações não salvas: ${changes.join(", ")}` });
+        continue;
+      }
+      await removeWorktree(state.root, target.path, Boolean(options.force));
+      result.removedWorktrees.push(target.path);
+    } catch (error) {
+      result.skippedWorktrees.push({ path: target.path, reason: message(error) });
+    }
+  }
+  if (options.deleteBranches) {
+    for (const target of cleanupTargets(state)) {
+      try {
+        await deleteBranch(state.root, target.branch, Boolean(options.force));
+        result.deletedBranches.push(target.branch);
+      } catch (error) {
+        result.skippedBranches.push({ branch: target.branch, reason: message(error) });
+      }
+    }
+  }
+  state.cleanup = result;
+  writeJson(join(directory, id, "state.json"), state);
+  return result;
 }
 
 export function sendToTeam(id: string, to: string, text: string, directory = DEFAULT_TEAM_DIRECTORY): void {

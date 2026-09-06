@@ -1,11 +1,12 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentName, AgentRunOptions, AgentRunner } from "../types.js";
-import { readTeam, runTeam, sendToTeam } from "./coordinator.js";
+import { cleanupTeam, isTeamInterrupted, readTeam, recoverTeam, runTeam, sendToTeam } from "./coordinator.js";
 import { git } from "./worktrees.js";
+import { writeJson } from "./mailbox.js";
 import type { TeamPlan } from "./plan.js";
 const roots: string[] = [];
 afterEach(() => { roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })); });
@@ -138,6 +139,34 @@ describe("coordenador com Git real", () => {
     expect(state.messages).toEqual([expect.objectContaining({ from: "user", to: "api", text: "use JWT" })]);
     expect(() => sendToTeam(state.id, "api", "tarde", directory)).toThrow("não está executando");
   });
+
+  it("executa o bootstrap sem shell antes de chamar a subtarefa", async () => {
+    const { repo, directory } = await fixture();
+    const worker: AgentRunner = async (options) => {
+      expect(readFileSync(join(options.cwd!, "bootstrap.txt"), "utf8")).toBe("pronto\n");
+      return result("codex", options);
+    };
+    const state = await runTeam({
+      task: "teste", cwd: repo, directory, plan: { tasks: [plan.tasks[0]!] },
+      bootstrap: [process.execPath, "-e", "require('node:fs').writeFileSync('bootstrap.txt', 'pronto\\n')"],
+      runners: { codex: worker, claude: unused, antigravity: unused },
+    });
+    expect(state.status).toBe("completed");
+  });
+
+  it("limpa worktrees concluídas sem apagar alterações manuais e só força quando pedido", async () => {
+    const { repo, directory } = await fixture();
+    const state = await runTeam({ task: "teste", cwd: repo, directory, plan: { tasks: [plan.tasks[0]!] },
+      runners: { codex: async (o) => result("codex", o), claude: unused, antigravity: unused } });
+    writeFileSync(join(state.tasks[0]!.worktree, "manual.txt"), "preservar\n");
+    const safe = await cleanupTeam(state.id, { directory });
+    expect(safe.skippedWorktrees).toEqual(expect.arrayContaining([expect.objectContaining({ path: state.tasks[0]!.worktree })]));
+    expect(existsSync(state.tasks[0]!.worktree)).toBe(true);
+    const forced = await cleanupTeam(state.id, { directory, force: true });
+    expect(forced.removedWorktrees).toContain(state.tasks[0]!.worktree);
+    expect(existsSync(state.tasks[0]!.worktree)).toBe(false);
+    expect(existsSync(state.integration!.worktree)).toBe(false);
+  });
 });
 
 it("respeita limite de uma tarefa ativa mesmo com várias prontas", async () => {
@@ -164,4 +193,22 @@ it("falha no planejamento fica registrada sem disparar executores", async () => 
   expect(state.error).toContain("JSON válido");
   expect(codex).not.toHaveBeenCalled();
   expect(readTeam(state.id, directory).plannerResult).toBeDefined();
+});
+
+it("recupera uma equipe interrompida sem executar ou apagar worktrees", () => {
+  const root = mkdtempSync(join(tmpdir(), "orquestrador-recover-")); roots.push(root);
+  const directory = join(root, "teams");
+  const id = "12345678-1234-1234-1234-123456789abc";
+  const teamDirectory = join(directory, id);
+  const worktree = join(teamDirectory, "api");
+  mkdirSync(teamDirectory, { recursive: true });
+  writeJson(join(teamDirectory, "state.json"), {
+    id, task: "teste", root, base: "abc", directory: teamDirectory, status: "running", startedAt: "2026-01-01T00:00:00.000Z", ownerPid: 999_999_999,
+    tasks: [{ id: "api", agent: "codex", task: "API", dependsOn: [], status: "running", worktree, branch: `orquestrador/${id}/api` }], messages: [],
+  });
+  expect(isTeamInterrupted(readTeam(id, directory))).toBe(true);
+  const state = recoverTeam(id, directory);
+  expect(state.status).toBe("cancelled");
+  expect(state.tasks[0]?.status).toBe("cancelled");
+  expect(readTeam(id, directory).recoveredAt).toBeDefined();
 });

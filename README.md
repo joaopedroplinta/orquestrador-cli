@@ -84,7 +84,9 @@ das tarefas e os une em uma branch `orquestrador/<id>/integration`. A branch e
 os arquivos do checkout original permanecem intactos. Ao finalizar, a CLI mostra
 o diretório da integração e comandos para revisar o diff e fazer merge depois
 de testar. Um conflito interrompe a integração e preserva os arquivos conflitantes
-nessa worktree. Uma tarefa que falha bloqueia suas dependentes; as independentes
+nessa worktree. Quando a integração de uma dependência em uma subtarefa falha por
+conflito, a worktree dessa subtarefa também fica com o merge pendente: resolva-o
+manualmente ou execute `git merge --abort` nela antes de reutilizá-la. Uma tarefa que falha bloqueia suas dependentes; as independentes
 terminam e a integração é marcada como parcial. O modo não faz retry automático
 de tarefas que podem ter alterado arquivos.
 
@@ -92,15 +94,24 @@ de tarefas que podem ter alterado arquivos.
 cancela as chamadas ativas e impede novas tarefas; resultados e worktrees ficam
 preservados. Estado, respostas, uso reportado e mensagens ficam em
 `~/.orquestrador/teams/<id>/state.json`, consultáveis com `team status`, separados
-do histórico SQLite de `run`. Em término abrupto do processo, o último estado
-pode continuar marcado como ativo; ainda não há recuperação automática.
+do histórico SQLite de `run`. `team list` mostra o histórico e marca como
+interrompida uma equipe cujo processo não existe mais. Nesse caso, execute
+`team recover <id>` para fechar o registro sem perder worktrees; ele não tenta
+reexecutar agentes automaticamente, pois uma worktree pode conter alterações
+parciais que precisam ser inspecionadas primeiro.
 
 Worktrees não recebem `node_modules`, arquivos ignorados ou credenciais do
-projeto original. A preparação de dependências deve estar na subtarefa quando
-necessária. A revisão/teste da integração é uma tarefa explícita do plano;
-sucesso dos processos não comprova por si só que o código está correto.
-Não há limpeza automática: depois de revisar/guardar os resultados, remova
-worktrees com `git worktree remove <caminho>` e branches com `git branch -d <branch>`.
+projeto original. Quando todas usam a mesma preparação, configure `team.bootstrap`
+no `.orquestradorrc`; o comando e seus argumentos são executados diretamente,
+sem shell, antes de cada subtarefa. A revisão/teste da integração é uma tarefa
+explícita do plano; sucesso dos processos não comprova por si só que o código
+está correto.
+
+Não há limpeza automática. Depois de revisar/guardar os resultados, use
+`team cleanup <id>`: ele remove apenas worktrees sem alterações pendentes e
+mantém qualquer uma que precise de atenção. `--force` descarta alterações
+pendentes; `--delete-branches` também remove as branches da equipe, portanto só
+use essas flags depois de guardar o que for necessário.
 O comando `team` é usado no terminal; os comandos e lotes da TUI continuam com
 o comportamento anterior. Na TUI, abra `orquestrador` e digite:
 
@@ -108,9 +119,9 @@ o comportamento anterior. Na TUI, abra `orquestrador` e digite:
 /team implementar login completo com backend, frontend e testes
 ```
 
-A tela acompanha o planejamento, as subtarefas e a integração. A equipe usa os
-agentes padrão disponíveis; para escolher agentes, concorrência ou fornecer um
-plano JSON, use o comando `team run` no terminal.
+A tela acompanha o planejamento, as subtarefas e a integração. Escolha agentes
+e concorrência no próprio campo: `/team --agents claude,codex --concurrency 2
+implementar login`. Para fornecer um plano JSON, use `team run` no terminal.
 
 ## Codex e colaboração entre agentes
 
@@ -538,7 +549,14 @@ máquina.
   "routing": "keyword",
   "auto": false,
   "maxRetries": 5,
-  "retryBaseDelayMs": 2000
+  "retryBaseDelayMs": 2000,
+  "team": {
+    "agents": ["claude", "codex"],
+    "concurrency": 2,
+    "timeoutMs": 300000,
+    "bootstrap": ["npm", "ci"],
+    "bootstrapTimeoutMs": 600000
+  }
 }
 ```
 
@@ -551,6 +569,12 @@ Todos os campos são opcionais — configure só o que quiser mudar do padrão:
 | `auto`              | `--auto`            | Liga a classificação via IA quando a palavra-chave não decide nada.     |
 | `maxRetries`        | *(sem flag ainda)*  | Máximo de tentativas de retry por etapa em erro transitório.            |
 | `retryBaseDelayMs`  | *(sem flag ainda)*  | Base do backoff exponencial do retry, em milissegundos.                 |
+| `team`              | `team run`          | Defaults de equipe: agentes, concorrência, timeout e bootstrap.         |
+
+Em `team`, `bootstrap` é uma lista de programa e argumentos, sem expansão de
+shell: `["npm", "ci"]` executa `npm ci` dentro de cada worktree imediatamente
+antes do agente. Ele é útil quando cada subtarefa precisa de dependências, mas
+pode custar tempo e rede; omita-o quando o projeto não precisar dessa preparação.
 
 **Descoberta:** igual ao `CLAUDE.md` do Claude Code — `orquestrador`
 procura um `.orquestradorrc` a partir do diretório onde foi rodado,

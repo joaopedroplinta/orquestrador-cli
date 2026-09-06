@@ -18,6 +18,7 @@ import {
   type AgentErrorKind,
   type AgentName,
   type AgentRunResult,
+  type HistoryRun,
   type RoutingStrategy,
 } from "../types.js";
 import { agentColor } from "./agentColors.js";
@@ -50,7 +51,8 @@ type TranscriptEntry =
   | { kind: "info"; id: string; text: string }
   | { kind: "help"; id: string }
   | { kind: "status-card"; id: string; status: SystemStatus }
-  | { kind: "summary-card"; id: string }
+  /** `runs` vem resolvido de fora: ler SQLite dentro do render bloqueia o loop a cada re-render. */
+  | { kind: "summary-card"; id: string; runs: HistoryRun[] }
   | {
       kind: "retry";
       id: string;
@@ -202,7 +204,7 @@ function HelpView() {
           {"  • "}Encadeie agentes: antigravity&gt;codex&gt;claude: pesquisar, implementar e revisar
         </Text>
         <Text dimColor>
-          {"  • "}Use <Text color="green">/team implementar login completo</Text> para agentes coordenados em worktrees
+          {"  • "}Use <Text color="green">/team --agents claude,codex --concurrency 2 implementar login</Text> para configurar a equipe
         </Text>
         <Text dimColor>
           {"  • "}<Text color="green">/export json</Text> exporta todas as execuções para um arquivo JSON
@@ -228,7 +230,10 @@ function StatusCardView({ status }: { status: SystemStatus }) {
         <Box>
           <Text bold>Git Branch: </Text>
           {status.gitBranch ? (
-            <Text color="green">⎇ {status.gitBranch}</Text>
+            <>
+              <Text color="green">⎇ {status.gitBranch}</Text>
+              <Text color={status.gitClean ? "green" : "yellow"}> · {status.gitClean ? "limpo" : "com alterações"}</Text>
+            </>
           ) : (
             <Text dimColor>Não é um repositório git</Text>
           )}
@@ -280,9 +285,7 @@ function StatusCardView({ status }: { status: SystemStatus }) {
   );
 }
 
-function SummaryCardView() {
-  const runs = listRuns(100);
-
+function SummaryCardView({ runs }: { runs: HistoryRun[] }) {
   if (runs.length === 0) {
     return (
       <Box marginY={1}>
@@ -638,7 +641,7 @@ export default function App({
   );
 
   const runTeamFromTui = useCallback(
-    async (task: string) => {
+    async (task: string, options: { agents?: AgentName[]; concurrency?: number } = {}) => {
       setStatus("running");
       setRunningTask(task);
       setLiveTeam({ task, events: ["Preparando equipe e verificando o repositório Git..."] });
@@ -647,6 +650,8 @@ export default function App({
       try {
         const result = await runTeam({
           task,
+          agents: options.agents,
+          concurrency: options.concurrency,
           onEvent: (event) => {
             const formatted = formatTeamEvent(event);
             const id = event.match(/^Equipe ([a-f0-9-]{36}):/)?.[1];
@@ -720,7 +725,7 @@ export default function App({
           })();
           return;
         case "summary":
-          addEntry({ kind: "summary-card", id: randomUUID() });
+          addEntry({ kind: "summary-card", id: randomUUID(), runs: listRuns(100) });
           return;
         case "export": {
           const format = parsed.format;
@@ -791,7 +796,7 @@ export default function App({
           void runTasksInParallel(parsed.texts);
           return;
         case "team":
-          void runTeamFromTui(parsed.task);
+          void runTeamFromTui(parsed.task, { agents: parsed.agents, concurrency: parsed.concurrency });
           return;
       }
     },
@@ -898,7 +903,7 @@ function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
     case "status-card":
       return <StatusCardView status={entry.status} />;
     case "summary-card":
-      return <SummaryCardView />;
+      return <SummaryCardView runs={entry.runs} />;
     case "task":
       return (
         <Box marginTop={1} flexDirection="column">
