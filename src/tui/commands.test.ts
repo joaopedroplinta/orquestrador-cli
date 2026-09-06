@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { applyModeCommand, INITIAL_MODE_STATE, parseInput } from "./commands.js";
+import {
+  applyModeCommand,
+  getCommandSuggestions,
+  INITIAL_MODE_STATE,
+  parseInput,
+  SLASH_COMMANDS,
+} from "./commands.js";
 
 describe("parseInput", () => {
   it("texto sem barra vira uma tarefa", () => {
@@ -29,6 +35,19 @@ describe("parseInput", () => {
 
   it("/history vira history", () => {
     expect(parseInput("/history")).toEqual({ kind: "history" });
+  });
+
+  it("/help vira help", () => {
+    expect(parseInput("/help")).toEqual({ kind: "help" });
+  });
+
+  it("/status e /doctor viram status", () => {
+    expect(parseInput("/status")).toEqual({ kind: "status" });
+    expect(parseInput("/doctor")).toEqual({ kind: "status" });
+  });
+
+  it("/clear vira clear", () => {
+    expect(parseInput("/clear")).toEqual({ kind: "clear" });
   });
 
   it("/agent claude e /agent antigravity forçam o agente", () => {
@@ -78,6 +97,29 @@ describe("parseInput", () => {
   });
 });
 
+describe("getCommandSuggestions", () => {
+  it("retorna lista vazia para texto sem barra inicial", () => {
+    expect(getCommandSuggestions("pesquisar")).toEqual([]);
+    expect(getCommandSuggestions("")).toEqual([]);
+  });
+
+  it("retorna todos os comandos visíveis quando apenas '/' é digitado", () => {
+    const suggestions = getCommandSuggestions("/");
+    const visibleCount = SLASH_COMMANDS.filter((c) => !c.hidden).length;
+    expect(suggestions.length).toBe(visibleCount);
+  });
+
+  it("retorna sugestões filtradas por prefixo", () => {
+    const suggestions = getCommandSuggestions("/he");
+    expect(suggestions.some((c) => c.name === "help")).toBe(true);
+    expect(suggestions.every((c) => c.name.startsWith("he") || c.aliases?.some((a) => a.startsWith("he")))).toBe(true);
+  });
+
+  it("retorna vazio após espaço", () => {
+    expect(getCommandSuggestions("/agent ")).toEqual([]);
+  });
+});
+
 describe("applyModeCommand", () => {
   it("/agent claude força o agente no estado", () => {
     const next = applyModeCommand(INITIAL_MODE_STATE, { kind: "set-agent", agent: "claude" });
@@ -116,9 +158,12 @@ describe("applyModeCommand", () => {
     expect(state.mascotEnabled).toBe(true);
   });
 
-  it("comandos que não afetam o modo (exit, history, error, task) deixam o estado inalterado", () => {
+  it("comandos que não afetam o modo (exit, history, error, task, help, status, clear) deixam o estado inalterado", () => {
     expect(applyModeCommand(INITIAL_MODE_STATE, { kind: "exit" })).toEqual(INITIAL_MODE_STATE);
     expect(applyModeCommand(INITIAL_MODE_STATE, { kind: "history" })).toEqual(INITIAL_MODE_STATE);
+    expect(applyModeCommand(INITIAL_MODE_STATE, { kind: "help" })).toEqual(INITIAL_MODE_STATE);
+    expect(applyModeCommand(INITIAL_MODE_STATE, { kind: "status" })).toEqual(INITIAL_MODE_STATE);
+    expect(applyModeCommand(INITIAL_MODE_STATE, { kind: "clear" })).toEqual(INITIAL_MODE_STATE);
     expect(applyModeCommand(INITIAL_MODE_STATE, { kind: "error", message: "x" })).toEqual(INITIAL_MODE_STATE);
     expect(applyModeCommand(INITIAL_MODE_STATE, { kind: "task", text: "x" })).toEqual(INITIAL_MODE_STATE);
   });

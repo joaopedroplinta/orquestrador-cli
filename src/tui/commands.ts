@@ -1,12 +1,113 @@
 import { isAgentName } from "../agents/registry.js";
 import type { AgentName, RoutingStrategy } from "../types.js";
 
+export interface SlashCommandDef {
+  name: string;
+  aliases?: string[];
+  synopsis: string;
+  description: string;
+  category: "Agente e Roteamento" | "Sessão e Utilidades" | "Ajuda e Diagnóstico";
+  hidden?: boolean;
+}
+
+export const SLASH_COMMANDS: SlashCommandDef[] = [
+  {
+    name: "help",
+    synopsis: "/help",
+    description: "Exibe a lista completa de comandos disponíveis e atalhos",
+    category: "Ajuda e Diagnóstico",
+  },
+  {
+    name: "status",
+    aliases: ["doctor"],
+    synopsis: "/status",
+    description: "Verifica a saúde dos CLIs (claude, agy), Git, Node e SQLite",
+    category: "Ajuda e Diagnóstico",
+  },
+  {
+    name: "summary",
+    aliases: ["stats", "cost"],
+    synopsis: "/summary",
+    description: "Exibe o resumo consolidado de tarefas, tempo e custos da sessão",
+    category: "Sessão e Utilidades",
+  },
+  {
+    name: "export",
+    synopsis: "/export [md|json]",
+    description: "Exporta as execuções da sessão para um arquivo Markdown ou JSON",
+    category: "Sessão e Utilidades",
+  },
+  {
+    name: "history",
+    synopsis: "/history",
+    description: "Lista o histórico das execuções passadas",
+    category: "Sessão e Utilidades",
+  },
+  {
+    name: "clear",
+    synopsis: "/clear",
+    description: "Limpa a tela do terminal e reinicia a exibição",
+    category: "Sessão e Utilidades",
+  },
+  {
+    name: "agent",
+    synopsis: "/agent <claude|antigravity|auto>",
+    description: "Força o uso de um agente ou retorna ao modo automático",
+    category: "Agente e Roteamento",
+  },
+  {
+    name: "routing",
+    synopsis: "/routing <keyword|classify>",
+    description: "Define a estratégia de roteamento das tarefas",
+    category: "Agente e Roteamento",
+  },
+  {
+    name: "auto",
+    synopsis: "/auto",
+    description: "Alterna a classificação automática via Claude quando sem palavra-chave",
+    category: "Agente e Roteamento",
+  },
+  {
+    name: "mascot",
+    synopsis: "/mascot",
+    description: "Liga ou desliga a exibição do mascote ASCII",
+    category: "Sessão e Utilidades",
+  },
+  {
+    name: "exit",
+    aliases: ["quit"],
+    synopsis: "/exit",
+    description: "Encerra o orquestrador (Ctrl+C também sai)",
+    category: "Sessão e Utilidades",
+  },
+];
+
+export function getCommandSuggestions(input: string): SlashCommandDef[] {
+  const trimmed = input.trimStart();
+  if (!trimmed.startsWith("/")) return [];
+
+  // Se já digitou espaço, o comando já foi escolhido
+  if (trimmed.includes(" ")) return [];
+
+  const prefix = trimmed.slice(1).toLowerCase();
+  return SLASH_COMMANDS.filter((cmd) => {
+    if (cmd.hidden && cmd.name !== prefix) return false;
+    if (cmd.name.toLowerCase().startsWith(prefix)) return true;
+    return cmd.aliases?.some((alias) => alias.toLowerCase().startsWith(prefix)) ?? false;
+  });
+}
+
 export type ParsedInput =
   | { kind: "task"; text: string }
   /** 2+ tarefas separadas por ";" na mesma linha — rodam em paralelo via runPipelines. */
   | { kind: "tasks"; texts: string[] }
   | { kind: "exit" }
   | { kind: "history" }
+  | { kind: "status" }
+  | { kind: "summary" }
+  | { kind: "export"; format: "markdown" | "json" }
+  | { kind: "clear" }
+  | { kind: "help" }
   | { kind: "set-agent"; agent: AgentName | null }
   | { kind: "toggle-auto" }
   | { kind: "set-routing"; routing: RoutingStrategy }
@@ -42,6 +143,28 @@ export function parseInput(raw: string): ParsedInput {
       return { kind: "exit" };
     case "history":
       return { kind: "history" };
+    case "help":
+      return { kind: "help" };
+    case "status":
+    case "doctor":
+      return { kind: "status" };
+    case "summary":
+    case "stats":
+    case "cost":
+      return { kind: "summary" };
+    case "export":
+      if (arg === "json") {
+        return { kind: "export", format: "json" };
+      }
+      if (arg === "md" || arg === "markdown" || arg === "") {
+        return { kind: "export", format: "markdown" };
+      }
+      return {
+        kind: "error",
+        message: 'Uso: "/export" (Markdown) ou "/export json" (JSON).',
+      };
+    case "clear":
+      return { kind: "clear" };
     case "auto":
       return { kind: "toggle-auto" };
     case "agent":
@@ -65,11 +188,15 @@ export function parseInput(raw: string): ParsedInput {
       };
     case "mascot":
       return { kind: "toggle-mascot" };
-    default:
+    default: {
+      const visibleCmds = SLASH_COMMANDS.filter((c) => !c.hidden)
+        .map((c) => `/${c.name}`)
+        .join(", ");
       return {
         kind: "error",
-        message: `Comando desconhecido: "/${command}". Comandos disponíveis: /history, /agent, /auto, /routing, /mascot, /exit, /quit.`,
+        message: `Comando desconhecido: "/${command}". Comandos disponíveis: ${visibleCmds}.`,
       };
+    }
   }
 }
 

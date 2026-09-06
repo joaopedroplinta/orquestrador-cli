@@ -2,6 +2,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../orchestrator/pipeline.js", () => ({ runPipeline: vi.fn(), runPipelines: vi.fn() }));
 vi.mock("../storage/history.js", () => ({ listRuns: vi.fn() }));
+vi.mock("../systemStatus.js", () => ({
+  getGitBranch: vi.fn().mockResolvedValue("main"),
+  getSystemStatus: vi.fn().mockResolvedValue({
+    cwd: "/test",
+    projectName: "test-project",
+    gitBranch: "main",
+    nodeVersion: "v20.0.0",
+    historyRunsCount: 5,
+    claude: { installed: true, version: "1.0.0" },
+    antigravity: { installed: true, version: "2.0.0" },
+  }),
+}));
 
 import { cleanup, render } from "ink-testing-library";
 import type { RunManyOptions, RunPipelineOptions } from "../orchestrator/pipeline.js";
@@ -302,6 +314,37 @@ describe("App (TUI) — slash commands", () => {
     // a tela continua funcional depois do erro
     await submit(stdin, "/agent claude");
     expect(lastFrame()).toContain("agente: claude (forçado)");
+  });
+
+  it("/help exibe guia de comandos e categorias", async () => {
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "/help");
+
+    expect(lastFrame()).toContain("Comandos do Orquestrador");
+    expect(lastFrame()).toContain("/status");
+    expect(lastFrame()).toContain("/history");
+  });
+
+  it("/status exibe diagnóstico do ambiente", async () => {
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "/status");
+    await tick();
+    await tick();
+
+    expect(lastFrame()).toContain("Diagnóstico do Ambiente");
+    expect(lastFrame()).toContain("Node.js");
+  });
+
+  it("/clear limpa o histórico de exibição mantendo o banner", async () => {
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "/help");
+    expect(lastFrame()).toContain("Comandos do Orquestrador");
+
+    await submit(stdin, "/clear");
+    await tick();
+    await tick();
+    expect(lastFrame()).toContain("Histórico visual limpo.");
+    expect(lastFrame()).toContain("⚡ orquestrador");
   });
 
   it("/exit encerra a aplicação", async () => {
