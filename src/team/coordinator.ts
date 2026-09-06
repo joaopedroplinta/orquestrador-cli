@@ -6,6 +6,7 @@ import { AGENT_REGISTRY } from "../agents/registry.js";
 import type { AgentName, AgentRunResult, AgentRunner } from "../types.js";
 import { createMailbox, queueUserMessage, TeamMailbox, writeJson, type TeamMessage } from "./mailbox.js";
 import { TeamStore } from "./persistence.js";
+import { runScheduled } from "../orchestrator/scheduler.js";
 import { parsePlannerOutput, parseTeamPlan, plannerPrompt, type TeamPlan, type TeamTask } from "./plan.js";
 import {
   checkpoint,
@@ -123,7 +124,6 @@ export async function runTeam(options: TeamOptions): Promise<TeamState> {
   let timer: ReturnType<typeof setInterval> | undefined;
   let mailbox: TeamMailbox | undefined;
   let pumpError: unknown;
-  const running = new Map<string, Promise<void>>();
   try {
     emit(`Equipe ${id}: ${directory}`);
     if (!plan) {
@@ -162,9 +162,7 @@ export async function runTeam(options: TeamOptions): Promise<TeamState> {
     }, 200);
 
     const execute = async (task: TaskState) => {
-      task.status = "running";
-      emit(`[${task.id}/${task.agent}] iniciando`);
-      try {
+      {
         const dependencies = task.dependsOn.map((id) => state.tasks.find((task) => task.id === id)!);
         for (const dependency of dependencies) await mergeCommit(task.worktree, dependency.commit!);
         controller.signal.throwIfAborted();
@@ -191,28 +189,41 @@ export async function runTeam(options: TeamOptions): Promise<TeamState> {
         controller.signal.throwIfAborted();
         await mailbox!.flush();
         task.commit = await checkpoint(task.worktree, task.id);
-        task.status = "completed";
-        emit(`[${task.id}] concluída (${task.commit.slice(0, 8)})`);
-      } catch (error) {
-        task.status = controller.signal.aborted ? "cancelled" : "failed";
-        task.error = message(error);
-        emit(`[${task.id}] ${task.status}: ${task.error}`);
+        return task.commit;
       }
     };
-    while (state.tasks.some((t) => t.status === "pending") || running.size) {
-      for (const task of state.tasks.filter((t) => t.status === "pending")) {
-        const deps = task.dependsOn.map((id) => state.tasks.find((t) => t.id === id)!);
-        if (controller.signal.aborted || deps.some((d) => ["failed", "blocked", "cancelled"].includes(d.status))) {
-          task.status = controller.signal.aborted ? "cancelled" : "blocked";
-          task.error = controller.signal.aborted ? "Equipe cancelada." : "Uma dependência não foi concluída.";
-          emit(`[${task.id}] ${task.status}`);
-        } else if (running.size < concurrency && deps.every((d) => d.status === "completed")) {
-          const promise = execute(task).finally(() => running.delete(task.id));
-          running.set(task.id, promise);
+
+    // Escalonamento delegado ao kernel compartilhado com `runPipelines`
+    // (orchestrator/scheduler.ts) — semáforo, grafo de dependências e
+    // cancelamento moram lá. Aqui fica só o que é específico de equipe:
+    // worktree, mailbox e checkpoint em Git.
+    const byId = new Map(state.tasks.map((task) => [task.id, task]));
+    await runScheduled<string>({
+      concurrency,
+      signal: controller.signal,
+      tasks: state.tasks.map((task) => ({
+        id: task.id,
+        dependsOn: task.dependsOn,
+        run: () => execute(task),
+      })),
+      onTaskStart: (id) => {
+        const task = byId.get(id)!;
+        task.status = "running";
+        emit(`[${task.id}/${task.agent}] iniciando`);
+      },
+      onTaskSettle: (outcome) => {
+        const task = byId.get(outcome.id)!;
+        task.status = outcome.status;
+        if (outcome.status === "completed") {
+          emit(`[${task.id}] concluída (${task.commit!.slice(0, 8)})`);
+          return;
         }
-      }
-      if (running.size) await Promise.race(running.values());
-    }
+        task.error = outcome.status === "blocked"
+          ? "Uma dependência não foi concluída."
+          : message(outcome.error);
+        emit(`[${task.id}] ${task.status}: ${task.error}`);
+      },
+    });
     await mailbox.flush();
     if (pumpError) throw pumpError;
     if (controller.signal.aborted) { state.status = "cancelled"; return state; }
@@ -247,7 +258,9 @@ export async function runTeam(options: TeamOptions): Promise<TeamState> {
   } catch (error) {
     const cancelled = controller.signal.aborted && !pumpError;
     controller.abort();
-    await Promise.allSettled(running.values());
+    // Nada a esperar aqui: `runScheduled` só retorna (ou propaga) depois que
+    // todas as tarefas em voo terminaram, então uma exceção que chega aqui
+    // veio da preparação (worktree, plano) ou da integração, não do laço.
     for (const task of state.tasks.filter((t) => t.status === "pending")) {
       task.status = "cancelled";
       task.error = "Preparação ou execução da equipe interrompida.";

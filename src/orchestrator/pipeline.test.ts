@@ -329,8 +329,9 @@ describe("runPipelines — prefixo de agente por tarefa", () => {
 
     // A segunda tarefa tem keyword de implementação ("implementar"), mas o
     // prefixo "antigravity:" força o outro agente mesmo assim.
-    expect(mockedRunClaudeCode).toHaveBeenCalledWith({ prompt: "implementar X", context: undefined });
-    expect(mockedRunAntigravity).toHaveBeenCalledWith({ prompt: "implementar Y", context: undefined });
+    // objectContaining porque em lote o kernel também injeta `signal` (cancelamento).
+    expect(mockedRunClaudeCode).toHaveBeenCalledWith(expect.objectContaining({ prompt: "implementar X", context: undefined }));
+    expect(mockedRunAntigravity).toHaveBeenCalledWith(expect.objectContaining({ prompt: "implementar Y", context: undefined }));
     expect(results[0]!.result?.steps[0]?.agent).toBe("claude");
     expect(results[1]!.result?.steps[0]?.agent).toBe("antigravity");
   });
@@ -524,8 +525,9 @@ describe("runPipelines", () => {
     expect(results[0]!.result?.steps[0]?.agent).toBe("antigravity");
     expect(results[1]!.task).toBe("implementar Y");
     expect(results[1]!.result?.steps[0]?.agent).toBe("claude");
-    expect(mockedRunAntigravity).toHaveBeenCalledWith({ prompt: "pesquisar X", context: undefined });
-    expect(mockedRunClaudeCode).toHaveBeenCalledWith({ prompt: "implementar Y", context: undefined });
+    // objectContaining porque em lote o kernel também injeta `signal` (cancelamento).
+    expect(mockedRunAntigravity).toHaveBeenCalledWith(expect.objectContaining({ prompt: "pesquisar X", context: undefined }));
+    expect(mockedRunClaudeCode).toHaveBeenCalledWith(expect.objectContaining({ prompt: "implementar Y", context: undefined }));
   });
 
   it("reporta falha parcial sem afetar a tarefa que teve sucesso", async () => {

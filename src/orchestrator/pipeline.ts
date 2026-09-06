@@ -9,6 +9,7 @@ import {
   type RoutingStrategy,
 } from "../types.js";
 import { classifyTaskWithClaude, parseTaskAgentPrefix, planTask, type TaskStep } from "./router.js";
+import { DEFAULT_CONCURRENCY, runScheduled } from "./scheduler.js";
 
 const SIMULATED_REVEAL_STEPS = 24;
 const SIMULATED_REVEAL_DURATION_MS = 500;
@@ -38,6 +39,15 @@ async function simulateStreamingReveal(text: string, onChunk: (chunk: string) =>
 export interface RunPipelineOptions {
   task: string;
   forceAgent?: AgentName;
+  /**
+   * Diretório onde os agentes desta tarefa rodam. Omitido, herdam o
+   * `process.cwd()` do processo — o que significa que duas tarefas paralelas
+   * compartilham a mesma árvore e podem se sobrescrever. Quem roda em lote
+   * deve dar um diretório próprio por tarefa (ver `runPipelines`).
+   */
+  cwd?: string;
+  /** Cancelamento em cascata: propagado até o subprocesso do agente. */
+  signal?: AbortSignal;
   /**
    * Estratégia de roteamento quando não há `forceAgent` (nem global nem por
    * prefixo) — padrão "keyword". Ver `RoutingStrategy` em types.ts.
@@ -145,6 +155,8 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       const result = await agentDef.runner({
         prompt: taskStep.prompt,
         context: previousOutput,
+        cwd: options.cwd,
+        signal: options.signal,
         // Só passa onChunk pro wrapper quando o agente escreve de forma
         // incremental de verdade — pra um agente que não escreve (claude),
         // isso resultaria num único chunk gigante bem no final, então nem
@@ -204,6 +216,18 @@ export interface RunManyOptions {
   forceAgent?: AgentName;
   routing?: RoutingStrategy;
   auto?: boolean;
+  /**
+   * Máximo de tarefas simultâneas — padrão `DEFAULT_CONCURRENCY`. Sem teto,
+   * um lote de 20 subia 20 processos de CLI de agente de uma vez.
+   */
+  concurrency?: number;
+  /** Cancelamento do lote inteiro; propagado até cada subprocesso. */
+  signal?: AbortSignal;
+  /**
+   * Diretório de cada tarefa, por índice. Sem isso todas compartilham o
+   * `process.cwd()` e podem sobrescrever os arquivos umas das outras.
+   */
+  cwdForTask?: (taskIndex: number) => string | undefined;
   /** Mesmos callbacks de streaming do runPipeline, mas com o índice (em `tasks`) da tarefa dona do evento. */
   onTaskStepStart?: (taskIndex: number, agent: AgentName) => void;
   onTaskChunk?: (taskIndex: number, agent: AgentName, chunk: string) => void;
@@ -222,26 +246,37 @@ export interface RunManyResult {
 // Tarefas top-level não têm handoff entre si, então rodam concorrentemente;
 // cada uma resolve seu próprio plano e loga seu próprio run/steps normalmente.
 // Sem resolveAmbiguousAgent aqui: várias tarefas não podem disputar o mesmo prompt interativo.
+//
+// Delega o escalonamento pro kernel compartilhado (`runScheduled`), o mesmo
+// que o modo team usa — é assim que este caminho ganhou teto de concorrência
+// e cancelamento, que antes só existiam no coordenador de equipes.
 export async function runPipelines(options: RunManyOptions): Promise<RunManyResult[]> {
-  const settled = await Promise.allSettled(
-    options.tasks.map((task, index) =>
-      runPipeline({
-        task,
-        forceAgent: options.forceAgent,
-        routing: options.routing,
-        auto: options.auto,
-        maxRetries: options.maxRetries,
-        retryBaseDelayMs: options.retryBaseDelayMs,
-        onStepStart: options.onTaskStepStart ? (agent) => options.onTaskStepStart!(index, agent) : undefined,
-        onChunk: options.onTaskChunk ? (agent, chunk) => options.onTaskChunk!(index, agent, chunk) : undefined,
-        onStepComplete: options.onTaskStepComplete ? (result) => options.onTaskStepComplete!(index, result) : undefined,
-        onRetry: options.onTaskRetry ? (agent, info) => options.onTaskRetry!(index, agent, info) : undefined,
-      }),
-    ),
-  );
+  const outcomes = await runScheduled<PipelineResult>({
+    concurrency: options.concurrency ?? DEFAULT_CONCURRENCY,
+    signal: options.signal,
+    tasks: options.tasks.map((task, index) => ({
+      // Índice no id: o texto da tarefa pode se repetir num lote, o índice não.
+      id: `${index}`,
+      run: ({ signal }) =>
+        runPipeline({
+          task,
+          forceAgent: options.forceAgent,
+          routing: options.routing,
+          auto: options.auto,
+          cwd: options.cwdForTask?.(index),
+          signal,
+          maxRetries: options.maxRetries,
+          retryBaseDelayMs: options.retryBaseDelayMs,
+          onStepStart: options.onTaskStepStart ? (agent) => options.onTaskStepStart!(index, agent) : undefined,
+          onChunk: options.onTaskChunk ? (agent, chunk) => options.onTaskChunk!(index, agent, chunk) : undefined,
+          onStepComplete: options.onTaskStepComplete ? (result) => options.onTaskStepComplete!(index, result) : undefined,
+          onRetry: options.onTaskRetry ? (agent, info) => options.onTaskRetry!(index, agent, info) : undefined,
+        }),
+    })),
+  });
 
-  return settled.map((outcome, i) => {
+  return outcomes.map((outcome, i) => {
     const task = options.tasks[i]!;
-    return outcome.status === "fulfilled" ? { task, result: outcome.value } : { task, error: outcome.reason };
+    return outcome.status === "completed" ? { task, result: outcome.value! } : { task, error: outcome.error };
   });
 }
