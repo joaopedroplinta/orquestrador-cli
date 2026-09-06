@@ -18,6 +18,7 @@ export function computeSessionStats(runs: HistoryRun[]): SessionStats {
     totalDurationMs: 0,
     totalCostUsd: 0,
     agentBreakdown: {
+      codex: { steps: 0, durationMs: 0 },
       claude: { steps: 0, durationMs: 0 },
       antigravity: { steps: 0, durationMs: 0 },
     },

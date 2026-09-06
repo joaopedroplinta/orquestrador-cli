@@ -14,6 +14,7 @@ export interface SystemStatus {
   gitBranch: string | null;
   nodeVersion: string;
   historyRunsCount: number;
+  codex: CliHealth;
   claude: CliHealth;
   antigravity: CliHealth;
 }
@@ -45,10 +46,11 @@ export async function getSystemStatus(): Promise<SystemStatus> {
   const cwd = process.cwd();
   const projectName = basename(cwd);
 
-  const [gitBranch, claudeHealth, agyHealth] = await Promise.all([
+  const [gitBranch, claudeHealth, agyHealth, codexHealth] = await Promise.all([
     getGitBranch(cwd),
     checkCli("claude"),
     checkCli("agy"),
+    checkCli("codex"),
   ]);
 
   let historyRunsCount = 0;
@@ -65,6 +67,7 @@ export async function getSystemStatus(): Promise<SystemStatus> {
     gitBranch,
     nodeVersion: process.version,
     historyRunsCount,
+    codex: codexHealth,
     claude: claudeHealth,
     antigravity: agyHealth,
   };

@@ -21,7 +21,7 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
     name: "status",
     aliases: ["doctor"],
     synopsis: "/status",
-    description: "Verifica a saúde dos CLIs (claude, agy), Git, Node e SQLite",
+    description: "Verifica a saúde dos CLIs (claude, agy, codex), Git, Node e SQLite",
     category: "Ajuda e Diagnóstico",
   },
   {
@@ -44,6 +44,12 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
     category: "Sessão e Utilidades",
   },
   {
+    name: "team",
+    synopsis: "/team <tarefa>",
+    description: "Planeja e executa uma equipe paralela em worktrees isoladas",
+    category: "Agente e Roteamento",
+  },
+  {
     name: "clear",
     synopsis: "/clear",
     description: "Limpa a tela do terminal e reinicia a exibição",
@@ -51,7 +57,7 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
   },
   {
     name: "agent",
-    synopsis: "/agent <claude|antigravity|auto>",
+    synopsis: "/agent <claude|antigravity|codex|auto>",
     description: "Força o uso de um agente ou retorna ao modo automático",
     category: "Agente e Roteamento",
   },
@@ -66,12 +72,6 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
     synopsis: "/auto",
     description: "Alterna a classificação automática via Claude quando sem palavra-chave",
     category: "Agente e Roteamento",
-  },
-  {
-    name: "mascot",
-    synopsis: "/mascot",
-    description: "Liga ou desliga a exibição do mascote ASCII",
-    category: "Sessão e Utilidades",
   },
   {
     name: "exit",
@@ -101,6 +101,7 @@ export type ParsedInput =
   | { kind: "task"; text: string }
   /** 2+ tarefas separadas por ";" na mesma linha — rodam em paralelo via runPipelines. */
   | { kind: "tasks"; texts: string[] }
+  | { kind: "team"; task: string }
   | { kind: "exit" }
   | { kind: "history" }
   | { kind: "status" }
@@ -111,7 +112,6 @@ export type ParsedInput =
   | { kind: "set-agent"; agent: AgentName | null }
   | { kind: "toggle-auto" }
   | { kind: "set-routing"; routing: RoutingStrategy }
-  | { kind: "toggle-mascot" }
   | { kind: "error"; message: string };
 
 function isRoutingStrategy(value: string): value is RoutingStrategy {
@@ -135,7 +135,8 @@ export function parseInput(raw: string): ParsedInput {
 
   const [rawCommand, ...rest] = trimmed.slice(1).split(/\s+/);
   const command = (rawCommand ?? "").toLowerCase();
-  const arg = rest.join(" ").toLowerCase();
+  const rawArg = rest.join(" ").trim();
+  const arg = rawArg.toLowerCase();
 
   switch (command) {
     case "exit":
@@ -143,6 +144,9 @@ export function parseInput(raw: string): ParsedInput {
       return { kind: "exit" };
     case "history":
       return { kind: "history" };
+    case "team":
+      if (rawArg) return { kind: "team", task: rawArg };
+      return { kind: "error", message: 'Uso: "/team <tarefa>". Ex.: /team implementar login completo com testes' };
     case "help":
       return { kind: "help" };
     case "status":
@@ -176,7 +180,7 @@ export function parseInput(raw: string): ParsedInput {
       }
       return {
         kind: "error",
-        message: 'Uso: "/agent claude", "/agent antigravity" ou "/agent auto" (volta ao roteamento normal).',
+        message: 'Uso: "/agent claude", "/agent antigravity", "/agent codex" ou "/agent auto" (volta ao roteamento normal).',
       };
     case "routing":
       if (isRoutingStrategy(arg)) {
@@ -186,8 +190,6 @@ export function parseInput(raw: string): ParsedInput {
         kind: "error",
         message: 'Uso: "/routing keyword" ou "/routing classify".',
       };
-    case "mascot":
-      return { kind: "toggle-mascot" };
     default: {
       const visibleCmds = SLASH_COMMANDS.filter((c) => !c.hidden)
         .map((c) => `/${c.name}`)
@@ -201,24 +203,21 @@ export function parseInput(raw: string): ParsedInput {
 }
 
 export interface ModeState {
-  /** Agente forçado via "/agent claude|antigravity" — null = roteamento normal (planTask/--auto). */
+  /** Agente forçado via "/agent claude|antigravity|codex" — null = roteamento normal (planTask/--auto). */
   forcedAgent: AgentName | null;
   /** Equivalente ao --auto do modo CLI: classifica via claude quando planTask vier vazio. Sem efeito quando routing="classify". */
   autoMode: boolean;
   /** Equivalente ao --routing do modo CLI — padrão "keyword". */
   routing: RoutingStrategy;
-  /** Liga/desliga o mascote (banner, spinner e reações). Padrão true; --no-mascot seta o valor inicial. */
-  mascotEnabled: boolean;
 }
 
 export const INITIAL_MODE_STATE: ModeState = {
   forcedAgent: null,
   autoMode: false,
   routing: "keyword",
-  mascotEnabled: true,
 };
 
-// Só "set-agent", "toggle-auto", "set-routing" e "toggle-mascot" alteram o modo; os demais retornam o estado inalterado.
+// Só "set-agent", "toggle-auto" e "set-routing" alteram o modo; os demais retornam o estado inalterado.
 export function applyModeCommand(state: ModeState, action: ParsedInput): ModeState {
   switch (action.kind) {
     case "set-agent":
@@ -227,8 +226,6 @@ export function applyModeCommand(state: ModeState, action: ParsedInput): ModeSta
       return { ...state, autoMode: !state.autoMode };
     case "set-routing":
       return { ...state, routing: action.routing };
-    case "toggle-mascot":
-      return { ...state, mascotEnabled: !state.mascotEnabled };
     default:
       return state;
   }

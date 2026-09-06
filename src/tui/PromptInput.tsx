@@ -5,12 +5,15 @@ import { getCommandSuggestions, type SlashCommandDef } from "./commands.js";
 
 export interface PromptInputProps {
   onSubmit: (value: string) => void;
+  /** Atualiza a TUI com a intenção em edição, sem esperar Enter. */
+  onChange?: (value: string) => void;
   placeholder?: string;
   disabled?: boolean;
 }
 
 export default function PromptInput({
   onSubmit,
+  onChange,
   placeholder = "",
   disabled = false,
 }: PromptInputProps) {
@@ -83,20 +86,40 @@ export default function PromptInput({
       }
 
       if (key.tab) {
-        if (isAutocompleteActive && suggestions[selectedIndex]) {
+        if (
+          isAutocompleteActive &&
+          suggestions[selectedIndex] &&
+          display.trim().toLowerCase() !== `/${suggestions[selectedIndex]!.name}`
+        ) {
           const selected = suggestions[selectedIndex];
           const completed = `/${selected.name} `;
           valueRef.current = completed;
           setDisplay(completed);
+          onChange?.(completed);
           setSelectedIndex(0);
         }
         return;
       }
 
       if (key.return) {
+        // A lista sempre disse "Tab/Enter selecionar". Enter agora completa
+        // quando o menu está aberto; um segundo Enter executa o comando.
+        if (
+          isAutocompleteActive &&
+          suggestions[selectedIndex] &&
+          display.trim().toLowerCase() !== `/${suggestions[selectedIndex]!.name}`
+        ) {
+          const completed = `/${suggestions[selectedIndex]!.name} `;
+          valueRef.current = completed;
+          setDisplay(completed);
+          onChange?.(completed);
+          setSelectedIndex(0);
+          return;
+        }
         const value = valueRef.current;
         valueRef.current = "";
         setDisplay("");
+        onChange?.("");
         setSelectedIndex(0);
         historyIndexRef.current = -1;
 
@@ -111,6 +134,7 @@ export default function PromptInput({
       if (key.backspace || key.delete) {
         valueRef.current = valueRef.current.slice(0, -1);
         setDisplay(valueRef.current);
+        onChange?.(valueRef.current);
         setSelectedIndex(0);
         return;
       }
@@ -120,6 +144,7 @@ export default function PromptInput({
       if (cleaned) {
         valueRef.current += cleaned;
         setDisplay(valueRef.current);
+        onChange?.(valueRef.current);
         setSelectedIndex(0);
       }
     },

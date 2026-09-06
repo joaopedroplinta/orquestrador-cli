@@ -17,8 +17,6 @@ export interface OrquestradorConfig {
   maxRetries?: number;
   /** Base do backoff exponencial em ms. */
   retryBaseDelayMs?: number;
-  /** Liga/desliga o mascote na TUI aberta a partir deste projeto — equivalente a --no-mascot quando `false`. */
-  mascot?: boolean;
 }
 
 function isRoutingStrategyValue(value: unknown): value is RoutingStrategy {
@@ -45,7 +43,7 @@ export function parseOrquestradorConfig(raw: string): { config: OrquestradorConf
 
   if ("agent" in obj) {
     if (typeof obj.agent === "string" && isAgentName(obj.agent)) config.agent = obj.agent;
-    else warnings.push(`"agent": ${JSON.stringify(obj.agent)} inválido (use "claude" ou "antigravity") — ignorado.`);
+    else warnings.push(`"agent": ${JSON.stringify(obj.agent)} inválido (use "claude", "antigravity" ou "codex") — ignorado.`);
   }
   if ("routing" in obj) {
     if (isRoutingStrategyValue(obj.routing)) config.routing = obj.routing;
@@ -69,11 +67,6 @@ export function parseOrquestradorConfig(raw: string): { config: OrquestradorConf
       warnings.push(`"retryBaseDelayMs": ${JSON.stringify(obj.retryBaseDelayMs)} inválido (use um inteiro > 0) — ignorado.`);
     }
   }
-  if ("mascot" in obj) {
-    if (typeof obj.mascot === "boolean") config.mascot = obj.mascot;
-    else warnings.push(`"mascot": ${JSON.stringify(obj.mascot)} inválido (use true ou false) — ignorado.`);
-  }
-
   return { config, warnings };
 }
 

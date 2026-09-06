@@ -13,7 +13,6 @@ describe("parseOrquestradorConfig", () => {
       auto: true,
       maxRetries: 5,
       retryBaseDelayMs: 2000,
-      mascot: false,
     });
 
     const { config, warnings } = parseOrquestradorConfig(raw);
@@ -25,7 +24,6 @@ describe("parseOrquestradorConfig", () => {
       auto: true,
       maxRetries: 5,
       retryBaseDelayMs: 2000,
-      mascot: false,
     });
   });
 
@@ -71,14 +69,13 @@ describe("parseOrquestradorConfig", () => {
     expect(parseOrquestradorConfig(JSON.stringify({ retryBaseDelayMs: -100 })).config).toEqual({});
   });
 
-  it('"mascot"/"auto" não-booleanos são descartados', () => {
-    expect(parseOrquestradorConfig(JSON.stringify({ mascot: "sim" })).config).toEqual({});
+  it('"auto" não-booleano é descartado', () => {
     expect(parseOrquestradorConfig(JSON.stringify({ auto: 1 })).config).toEqual({});
   });
 
   it("múltiplos campos inválidos geram um aviso por campo, não um só genérico", () => {
-    const { warnings } = parseOrquestradorConfig(JSON.stringify({ agent: "x", routing: "y", mascot: "z" }));
-    expect(warnings).toHaveLength(3);
+    const { warnings } = parseOrquestradorConfig(JSON.stringify({ agent: "x", routing: "y" }));
+    expect(warnings).toHaveLength(2);
   });
 });
 
@@ -154,4 +151,8 @@ describe("discoverProjectConfig", () => {
     expect(result?.config).toEqual({});
     expect(result?.warnings).toHaveLength(1);
   });
+});
+
+it("aceita Codex como agente padrão do projeto", () => {
+  expect(parseOrquestradorConfig('{"agent":"codex"}')).toEqual({ config: { agent: "codex" }, warnings: [] });
 });

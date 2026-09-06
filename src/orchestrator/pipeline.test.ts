@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentError, PipelineCancelledError, type AgentRunResult } from "../types.js";
 
+vi.mock("../agents/codex.js", () => ({ runCodex: vi.fn() }));
 vi.mock("../agents/claudeCode.js", () => ({ runClaudeCode: vi.fn() }));
 vi.mock("../agents/antigravity.js", () => ({ runAntigravity: vi.fn() }));
 vi.mock("../storage/history.js", () => ({
@@ -9,18 +10,20 @@ vi.mock("../storage/history.js", () => ({
   logStep: vi.fn(),
 }));
 
+import { runCodex } from "../agents/codex.js";
 import { runAntigravity } from "../agents/antigravity.js";
 import { runClaudeCode } from "../agents/claudeCode.js";
 import { finishRun, logStep, startRun } from "../storage/history.js";
 import { runPipeline, runPipelines } from "./pipeline.js";
 
+const mockedRunCodex = vi.mocked(runCodex);
 const mockedRunClaudeCode = vi.mocked(runClaudeCode);
 const mockedRunAntigravity = vi.mocked(runAntigravity);
 const mockedStartRun = vi.mocked(startRun);
 const mockedFinishRun = vi.mocked(finishRun);
 const mockedLogStep = vi.mocked(logStep);
 
-function fakeResult(agent: "claude" | "antigravity", output: string): AgentRunResult {
+function fakeResult(agent: "claude" | "antigravity" | "codex", output: string): AgentRunResult {
   return {
     agent,
     prompt: `prompt enviado pro ${agent}`,
@@ -687,5 +690,46 @@ describe("runPipelines — streaming", () => {
     // onStepStart nunca chegou a ser chamado pra essa tarefa (nunca teve plano)
     expect(onTaskStepStart).toHaveBeenCalledTimes(1);
     expect(onTaskStepStart).toHaveBeenCalledWith(0, "antigravity");
+  });
+});
+
+describe("colaboração com Codex", () => {
+  it("executa agy → codex → claude em ordem e registra o handoff", async () => {
+    mockedRunAntigravity.mockResolvedValue(fakeResult("antigravity", "pesquisa"));
+    mockedRunCodex.mockResolvedValue(fakeResult("codex", "implementação"));
+    mockedRunClaudeCode.mockResolvedValue(fakeResult("claude", "revisão"));
+    mockedLogStep.mockReturnValueOnce(20).mockReturnValueOnce(21).mockReturnValueOnce(22);
+    const result = await runPipeline({ task: "antigravity>codex>claude: pesquisar, implementar e revisar login" });
+    expect(result.steps.map((step) => step.agent)).toEqual(["antigravity", "codex", "claude"]);
+    expect(mockedRunCodex).toHaveBeenCalledWith(expect.objectContaining({ context: "pesquisa", prompt: expect.stringContaining("etapa 2/3") }));
+    expect(mockedRunClaudeCode).toHaveBeenCalledWith(expect.objectContaining({ context: "implementação" }));
+    expect(mockedRunCodex.mock.invocationCallOrder[0]).toBeGreaterThan(mockedRunAntigravity.mock.invocationCallOrder[0]!);
+    expect(mockedRunClaudeCode.mock.invocationCallOrder[0]).toBeGreaterThan(mockedRunCodex.mock.invocationCallOrder[0]!);
+    expect(mockedLogStep).toHaveBeenNthCalledWith(2, "run-1", expect.objectContaining({ agent: "codex", fedByStepId: 20 }));
+    expect(mockedLogStep).toHaveBeenNthCalledWith(3, "run-1", expect.objectContaining({ fedByStepId: 21 }));
+  });
+
+  it("interrompe a sequência se Codex falhar e finaliza o histórico", async () => {
+    mockedRunCodex.mockRejectedValue(new AgentError("codex", "nonzero_exit", "falhou"));
+    await expect(runPipeline({ task: "codex>claude: implementar e revisar" })).rejects.toThrow("falhou");
+    expect(mockedRunClaudeCode).not.toHaveBeenCalled();
+    expect(mockedLogStep).toHaveBeenCalledWith("run-1", expect.objectContaining({ agent: "codex", error: "nonzero_exit: falhou" }));
+    expect(mockedFinishRun).toHaveBeenCalledWith("run-1");
+  });
+
+  it("aceita Codex por prefixo e mantém prioridade de forceAgent sobre sequência", async () => {
+    mockedRunCodex.mockResolvedValue(fakeResult("codex", "feito"));
+    await runPipeline({ task: "codex: implementar X" });
+    expect(mockedRunCodex).toHaveBeenCalledWith(expect.objectContaining({ prompt: "implementar X" }));
+    await runPipeline({ task: "antigravity>claude: implementar X", forceAgent: "codex" });
+    expect(mockedRunCodex).toHaveBeenCalledTimes(2);
+    expect(mockedRunAntigravity).not.toHaveBeenCalled();
+    expect(mockedRunClaudeCode).not.toHaveBeenCalled();
+  });
+
+  it("valida toda a sequência e tarefa antes de abrir histórico", async () => {
+    await expect(runPipeline({ task: "codex>foo: implementar" })).rejects.toThrow("Prefixo de agente inválido");
+    await expect(runPipeline({ task: "codex>claude:  " })).rejects.toThrow("vazia");
+    expect(mockedStartRun).not.toHaveBeenCalled();
   });
 });

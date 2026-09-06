@@ -24,6 +24,7 @@ describe("systemStatus", () => {
     expect(status.projectName).toBeDefined();
     expect(status.nodeVersion).toBe(process.version);
     expect(typeof status.historyRunsCount).toBe("number");
+    expect(typeof status.codex.installed).toBe("boolean");
     expect(typeof status.claude.installed).toBe("boolean");
     expect(typeof status.antigravity.installed).toBe("boolean");
   });

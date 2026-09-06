@@ -5,6 +5,43 @@ Orquestrador CLI para Claude Code + Antigravity. **MVP completo** — ver
 quer rodar o CLI; este arquivo é o contexto de trabalho pra quem vai mexer
 no código.
 
+## Modo team
+
+`src/team/` implementa `team run/status/send`. Plano validado como DAG (até 12
+subtarefas), executor com concorrência limitada, worktrees por tarefa, caixas
+locais consultadas via helper Node e integração em worktree separada. O protocolo
+de mensagens é cooperativo: entrega a cada 200 ms, leitura por `inbox`, sem
+injeção automática no contexto de chamadas em andamento. Veja README e
+`examples/team-plan.json` para uso e limitações.
+
+Agentes recebem `cwd` e `signal` via `AgentRunOptions`/`runAgentCommand`; nunca
+usar `process.chdir()` com concorrência. `team` força zero retries e preserva
+worktrees em falhas/cancelamento/conflitos. Registro próprio em
+`~/.orquestrador/teams/<id>/state.json`; não usa o SQLite do comando `run`.
+Testes de `team` usam Git e subprocessos Node reais em diretórios temporários,
+com runners de IA simulados. Não fazem chamadas a modelos. As convenções abaixo
+sobre paralelismo apenas top-level continuam valendo para `run`; `team` é o
+novo executor para subtarefas dependentes de uma tarefa comum.
+
+## Integração Codex e sequências explícitas
+
+O registro agora inclui `codex`, usando `src/agents/codex.ts` e
+`codex exec --json --sandbox workspace-write -`. O prompt vai por stdin;
+a autenticação é a do CLI instalado. O adaptador espera o turno completo,
+extrai a última `agent_message`, valida `turn.completed` e registra tokens
+sem estimar custo. `streamsIncrementally: false` descreve esse adaptador
+bufferizado; não é uma afirmação sobre a capacidade do CLI de emitir eventos.
+Nenhuma execução real de modelo foi usada para validar esta alteração.
+
+`antigravity>codex>claude: tarefa` força etapas sequenciais com handoff,
+inclusive na TUI e em lotes. Nomes repetidos permitem retornar a um agente.
+O agente global continua tendo prioridade; a sequência precede keyword/classify.
+Cada etapa recebe instruções de posição e a resposta anterior. Não há sessões
+persistentes nem comunicação concorrente entre os processos. `;` na TUI
+continua separando tarefas independentes, então use vírgulas dentro da tarefa.
+Codex também está disponível em configuração, seleção interativa e diagnóstico.
+As seções históricas abaixo sobre apenas dois agentes descrevem o MVP anterior.
+
 ## Visão geral
 
 CLI em Node.js que orquestra duas ferramentas de IA agentic (Claude Code e
@@ -67,12 +104,11 @@ orquestrador history --last              # mostra detalhes da última execução
 orquestrador export <runId>              # relatório em markdown de um run (id completo ou prefixo de 8 chars)
 orquestrador export <runId> -o out.md    # escreve o relatório num arquivo em vez do stdout
 orquestrador                             # zero args: abre a tela interativa (Ink)
-orquestrador --no-mascot                 # idem, mas sem o pinguim ASCII (também dá pra alternar com /mascot dentro da tela)
 ```
 
 `.orquestradorrc` (JSON, opcional, na raiz de um projeto) configura
-`agent`/`routing`/`auto`/`maxRetries`/`retryBaseDelayMs`/`mascot` por
-projeto — ver Convenções abaixo pro discovery/precedência completos.
+`agent`/`routing`/`auto`/`maxRetries`/`retryBaseDelayMs` por projeto — ver
+Convenções abaixo pro discovery/precedência completos.
 
 ## Convenções
 
@@ -375,57 +411,6 @@ projeto — ver Convenções abaixo pro discovery/precedência completos.
   com `--output`/`-o`, sem confirmação — mesmo padrão Unix de qualquer CLI
   com uma flag de saída explícita (`curl -o`, etc.), sem pedir confirmação
   porque o usuário já nomeou o destino explicitamente via flag.
-- **Mascote (pinguim ASCII) segue a mesma separação pura-lógica/Ink-
-  componente já estabelecida com `commands.ts`/`App.tsx`.** `src/tui/mascot.ts`
-  é 100% dado/lógica pura (arte ASCII, seleção de frame por estado) — sem
-  import de Ink/React, testável direto (`mascot.test.ts`). `src/tui/Mascot.tsx`
-  são os componentes Ink que só consomem esses dados (`MascotBanner`,
-  `MascotSpinner`) — sem lógica própria de seleção, por isso sem teste
-  próprio (visual, não tem "estado" pra verificar além do que já está em
-  `mascot.ts`). Arte só ASCII puro, sem Unicode largo/exótico, de propósito
-  — o pedido foi não quebrar em terminal estreito, e ASCII simples também
-  reduz risco de sair torto em terminais com suporte limitado a caracteres
-  especiais.
-  - Três lugares de uso: banner (`Banner` em `App.tsx`, dentro do `<Static>`
-    — renderiza uma vez só, mesma abordagem do banner de texto já
-    existente), spinner (`MascotSpinner` substitui `<Spinner type="dots" />`
-    do `ink-spinner` quando o mascote está ligado, nos dois pontos onde
-    o dots aparecia — tarefa única e "Rodando N tarefas em paralelo"), e
-    reação (`mascotFaceFor("success"|"error"|"cancelled")`, prependida ao
-    texto das entradas `"result"`/`"error"`/`"cancelled"` do transcript no
-    momento em que são criadas, não num componente separado — evita
-    precisar repassar `mascotEnabled` como prop até `TranscriptEntryView`).
-  - **Deliberadamente sem carinha por tarefa no modo em lote (`;`)** — só o
-    spinner/reação do modo de tarefa única e o resumo agregado
-    "Rodando N tarefas em paralelo" ganham mascote; as caixas ao vivo por
-    tarefa dentro de um lote (`LiveTask`) não. Decisão de escopo consciente
-    (não uma limitação técnica): N pinguins piscando ao mesmo tempo lado a
-    lado seria mais poluição visual que graça, e o pedido original não
-    especificou isso pro modo em lote.
-  - **`MascotSpinner` usa `setInterval` a cada 400ms** (mais lento que o
-    dots padrão do `ink-spinner`, ~80ms, e mais rápido que o contador de
-    segundos, 1000ms) — mesma categoria de atualização periódica que já
-    existia antes (não introduz um padrão de risco novo pro bug de EIO,
-    bug #3), mas validado de novo com PTY real mesmo assim, por rigor:
-    tarefa real rodando com o mascote ligado, banner mostrando o pinguim,
-    animação "pensando" aparecendo e ciclando por alguns segundos sob
-    `incrementalRendering: true`, carinha feliz aparecendo no resultado —
-    sem nenhum `EIO`/`uncaughtException` no log da sessão.
-  - `ModeState.mascotEnabled` (`commands.ts`) segue o mesmo padrão de
-    `forcedAgent`/`autoMode`/`routing`: campo independente, `/mascot`
-    alterna (`toggle-mascot`, mesmo formato de `toggle-auto`), e
-    `INITIAL_MODE_STATE.mascotEnabled` é sobrescrito pelo valor inicial que
-    vem de fora (`App({ initialMascotEnabled })`) em vez de ser sempre
-    `true` — é assim que a flag `--no-mascot` do CLI chega até o estado
-    da TUI, sem precisar duplicar a lógica de toggle em dois lugares.
-  - **`--no-mascot` é tratado ANTES do `commander` processar `argv`** — a
-    TUI (zero subcomando) já era um caso especial resolvido por fora do
-    `commander` (`if (argv.length === 0)`); `--no-mascot` só amplia essa
-    checagem pra aceitar também `argv` com só essa flag e nada mais
-    (`isTuiInvocation`). Não virou uma opção `commander` de verdade porque
-    abrir a TUI não é um "comando" registrado nele, é o comportamento de
-    fallback quando não há nenhum — registrar a flag lá exigiria também
-    registrar um comando fantasma só pra ela existir.
 - **`package.json` pronto pra `npm publish`, mas nunca publicado de
   verdade.** `files: ["dist"]` (não `.npmignore` — mais explícito, sem
   dois mecanismos de exclusão sobrepostos pra manter sincronizados) exclui
@@ -451,7 +436,7 @@ projeto — ver Convenções abaixo pro discovery/precedência completos.
   - `parseOrquestradorConfig(raw)`: valida CADA campo individualmente
     (tipo E valor — `agent` precisa ser um `isAgentName()` de verdade,
     `routing` só "keyword"/"classify", `maxRetries`/`retryBaseDelayMs`
-    inteiros positivos, `auto`/`mascot` booleanos) e descarta só o campo
+    inteiros positivos, `auto` booleano) e descarta só o campo
     ruim, com um aviso específico — nunca invalida o arquivo inteiro por
     causa de UM campo errado, exceto quando o problema é estrutural (JSON
     inválido, ou o nível mais alto não é um objeto).
@@ -476,10 +461,10 @@ projeto — ver Convenções abaixo pro discovery/precedência completos.
     `RunAgentCommandOptions.retryBaseDelayMs` (default
     `DEFAULT_RETRY_BASE_DELAY_MS = 1000`), repassado pela mesma cadeia já
     usada por `maxRetries` (wrappers → `pipeline.ts` → `agents/shared.ts`).
-  - Na TUI, `agent`/`routing`/`auto` **seedam o `ModeState` inicial**
-    (mesmo padrão de `--no-mascot` → `initialMascotEnabled`) — o usuário
-    ainda pode trocar depois com `/agent`/`/routing`/`/auto` durante a
-    sessão; o config só decide o PONTO DE PARTIDA, não trava a sessão
+  - Na TUI, `agent`/`routing`/`auto` **seedam o `ModeState` inicial** —
+    o usuário ainda pode trocar depois com `/agent`/`/routing`/`/auto`
+    durante a sessão; o config só decide o PONTO DE PARTIDA, não trava a
+    sessão
     inteira. `maxRetries`/`retryBaseDelayMs` são diferentes: viram props
     fixas (`App({ maxRetries, retryBaseDelayMs })`, repassadas direto pra
     todo `runPipeline`/`runPipelines` da sessão) — não fazem parte de
@@ -518,8 +503,8 @@ projeto — ver Convenções abaixo pro discovery/precedência completos.
 
 ## Adicionando um novo agente
 
-Não tem um terceiro agente implementado hoje — isto é um guia de referência
-pra quando (se) precisar, não uma feature em progresso. A arquitetura foi
+Codex já foi adicionado como terceiro agente. Este guia serve para adicionar
+outros agentes. A arquitetura foi
 generalizada (PR de roteamento/registro) especificamente pra que os passos
 abaixo sejam a lista completa, sem precisar reabrir `pipeline.ts` nem
 `router.ts` pra fiação nova.
@@ -624,16 +609,7 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
       cabeçalho `=== Tarefa i/N ===` por resultado conforme chegam).
       `printResult`/`printError` foram extraídas em `cli.ts` pra serem
       reaproveitadas pelos dois modos.
-- [x] Testes automatizados com Vitest (171 casos):
-  - `src/tui/mascot.test.ts` (8 testes) — `mascotThinkingFrame` cicla pelos
-    4 frames na ordem certa e dá a volta (wrap-around) depois do último em
-    vez de `undefined`/travar (inclusive depois de várias voltas
-    completas); `mascotFaceFor` devolve uma carinha diferente pra cada
-    estado (sucesso/erro/cancelado), as três distintas entre si, e do
-    mesmo tamanho da carinha de "pensando" (mesmo personagem reagindo,
-    não um desenho diferente); e a arte do banner tem altura/largura
-    modestas (≤8 linhas, ≤20 colunas por linha) e é só ASCII puro
-    (regex `^[\x00-\x7F]*$`), sem depender de renderizar nada.
+- [x] Testes automatizados com Vitest:
   - `src/reporting.test.ts` — `buildMarkdownReport` com `HistoryRun`
     mockado (sem SQLite de verdade): título/metadados/contagem de etapas,
     heading de etapa com duração formatada e "alimentada pela etapa #N"
@@ -755,16 +731,14 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
     logando `usage: undefined` explicitamente, sem inventar nada.
   - `src/tui/commands.test.ts` — `parseInput` (task vs. cada slash command,
     case insensitivity, `/agent`/`/routing` com argumento inválido/ausente
-    virando erro, `/mascot` virando `toggle-mascot` (sem argumento, é só um
-    liga/desliga), comando desconhecido vira erro, `;`-separado com 2+
+    virando erro, comando desconhecido vira erro, `;`-separado com 2+
     partes não-vazias virando `{ kind: "tasks" }`, e `;` solto/sobrando no
     final caindo de volta pro `{ kind: "task" }` original) e
     `applyModeCommand` (`/agent` mudando `forcedAgent`, `/agent auto`
     resetando pra `null` mantendo o resto do estado, `/auto` alternando
     `autoMode` duas vezes, `/routing classify` mudando a estratégia mantendo
-    o resto do estado, `/mascot` alternando `mascotEnabled`, comandos que
-    não mexem no modo deixando o estado intacto, e os quatro campos sendo
-    independentes entre si).
+    o resto do estado, comandos que não mexem no modo deixando o estado
+    intacto, e os três campos sendo independentes entre si).
   - `src/tui/App.test.tsx` — renderiza `<App />` de verdade via
     `ink-testing-library` (stdin/stdout falso), mockando `runPipeline` e
     `listRuns`. Cobre: banner aparecendo uma única vez, fluxo completo de
@@ -798,16 +772,7 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
     `forcedAgent`/`autoMode` já setados, argumento inválido mostra erro
     amigável sem alterar o estado (continua em "keyword"), e uma tarefa
     rodada depois de `/routing classify` chega em `runPipeline` com
-    `routing: "classify"` de verdade (não só na exibição); mais 7 testes
-    de mascote: banner mostra o pinguim por padrão, `initialMascotEnabled={false}`
-    (equivalente ao `--no-mascot`) tira o pinguim do banner e mostra
-    "mascote: desligado" na `StatusLine`, `/mascot` alterna e reflete na
-    `StatusLine`, o frame de "pensando" (`(o o)`) aparece no lugar do
-    spinner padrão logo que uma tarefa começa a rodar, tarefa bem-sucedida
-    mostra a carinha feliz (`(^ ^)`) junto do resultado, tarefa com erro
-    mostra a carinha confusa (`(? ?)`) junto da mensagem, cancelamento
-    mostra a carinha neutra (`(- -)`), e com o mascote desligado nenhuma
-    carinha aparece em lugar nenhum (nem a de pensando, nem a de reação).
+    `routing: "classify"` de verdade (não só na exibição).
   - `src/config.test.ts` (18 testes) — `parseOrquestradorConfig` (config
     completo válido, objeto vazio, JSON inválido, JSON que não é objeto,
     cada campo validado e descartado independentemente com seu próprio
@@ -980,17 +945,6 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
       mostra tokens/custo por etapa e um resumo de custo total do run
       (marcado como parcial quando nem toda etapa reportou). Nunca
       inventamos um custo pro antigravity — só tokens, quando existirem.
-- [x] Mascote (pinguim ASCII) na TUI (`src/tui/mascot.ts` + `Mascot.tsx`).
-      Aparece no banner de boas-vindas (uma vez, dentro do `<Static>`),
-      substitui o spinner padrão por uma animação "pensando" (`(o o)` →
-      `(o o).` → `(o o)..` → `(o o)...`, ciclando a cada 400ms) enquanto
-      uma tarefa roda, e reage no resultado: `(^ ^)` sucesso, `(? ?)` erro,
-      `(- -)` cancelamento — mesma "família" visual (largura idêntica,
-      só o par do meio muda). Liga por padrão; `orquestrador --no-mascot`
-      desliga na abertura, `/mascot` alterna a qualquer momento dentro da
-      tela. Sem carinha por tarefa no modo em lote (`;`) — decisão de
-      escopo, ver Convenções. Arte só ASCII puro (sem Unicode largo), de
-      propósito, pra não quebrar em terminal estreito.
 - [x] `package.json` pronto pra `npm publish` (mas ainda **não publicado**
       de verdade): metadata completo (`name`, `version`, `description`,
       `bin`, `license`, `repository`/`bugs`/`homepage` apontando pro
@@ -1004,7 +958,7 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
       (`src/config.ts`), descoberto subindo diretórios a partir do cwd
       igual o `CLAUDE.md` do Claude Code (mais próximo do cwd vence, sem
       merge entre níveis). Configura `agent`/`routing`/`auto`/
-      `maxRetries`/`retryBaseDelayMs`/`mascot`; cada campo validado
+      `maxRetries`/`retryBaseDelayMs`; cada campo validado
       independentemente (campo ruim vira aviso específico e é descartado,
       sem invalidar o arquivo inteiro). Precedência em `run`/TUI: flag de
       CLI > `.orquestradorrc` > default global embutido mais embaixo
@@ -1159,18 +1113,6 @@ teste sempre limpo depois):
   tinha `retries`, mas não `usage`), e `history --last` leu os dados
   antigos normalmente, com `PRAGMA table_info(steps)` confirmando a coluna
   `usage` adicionada em cima do banco existente sem apagar nada.
-- Mascote, com PTY real (`pexpect`) e uma tarefa real (`agy`): banner
-  mostrou o pinguim (`/o o\`) já no primeiro frame; depois de submeter a
-  tarefa, o frame `(o o)` apareceu na primeira tentativa de Enter e a
-  animação ciclou por alguns segundos sob carga real de streaming, sem
-  nenhum `EIO`/`uncaughtException` no log da sessão; a carinha feliz
-  `(^ ^)` apareceu junto do resultado ao terminar. Testado também
-  `--no-mascot` (pinguim realmente ausente do banner, `StatusLine` já
-  nasce em "mascote: desligado") e `/mascot` religando em runtime
-  (confirmado com o padrão de retry de Enter já estabelecido neste
-  projeto pra PTY — a primeira tentativa sem retry pareceu falhar, mas
-  era só a flakiness de timing do pexpect já documentada aqui, não um bug:
-  com retry, `/mascot` funcionou na primeira tentativa de verdade).
 - `.orquestradorrc` + histórico por projeto, com o CLI real (`dist/cli.js`)
   rodando de dentro de um diretório temporário criado só pra esse teste:
   um `.orquestradorrc` com `{"agent": "claude", "routing": "classify"}`
@@ -1186,9 +1128,8 @@ teste sempre limpo depois):
   continuou sendo aplicado. Migração da coluna `cwd`: mesmo procedimento
   já usado pra `usage` (banco criado manualmente sem a coluna) — dados
   antigos continuaram legíveis, com a coluna adicionada silenciosamente.
-  TUI com PTY real: `.orquestradorrc` com `mascot: false` e
-  `agent: "claude"` abriu a tela já com o pinguim ausente e
-  `StatusLine` mostrando "agente: claude (forçado)" antes de qualquer
+  TUI com PTY real: `.orquestradorrc` com `agent: "claude"` abriu a tela já
+  com `StatusLine` mostrando "agente: claude (forçado)" antes de qualquer
   interação do usuário — confirmando o seeding do `ModeState` inicial a
   partir do config.
 
@@ -1327,19 +1268,6 @@ Cinco bugs reais encontrados e corrigidos durante o desenvolvimento:
   visão agregada de custo total gasto ao longo do tempo (soma de todos os
   runs do histórico). Precisaria de uma nova consulta em
   `storage/history.ts` percorrendo todos os `runs`/`steps`.
-- `--no-mascot` só funciona quando é a ÚNICA coisa em `argv` (junto de zero
-  subcomando) — `orquestrador --no-mascot --alguma-outra-flag` não abriria
-  a TUI (cairia no comportamento padrão do `commander`, que não reconhece
-  nenhuma dessas flags soltas). Não é uma limitação real hoje porque não
-  existe nenhuma outra flag pra combinar na abertura da TUI, mas se um dia
-  aparecer uma segunda, `isTuiInvocation` em `cli.ts` precisa virar uma
-  checagem de "é um subconjunto de flags conhecidas da TUI", não mais uma
-  comparação de array de tamanho 1.
-- Mascote: a arte é fixa (um só "personagem", sem opção de trocar
-  cor/skin/expressões) — não foi pedido, e adicionar isso agora seria
-  configuração especulativa sem uso real. Sem carinha por tarefa no modo
-  em lote (`;`) — decisão de escopo consciente, ver Convenções, não uma
-  limitação técnica.
 - `.orquestradorrc`: só o arquivo mais próximo do cwd é considerado — um
   monorepo com config na raiz e outro numa subpasta não faz merge dos
   dois, o de baixo simplesmente vence por inteiro. `maxRetries`/

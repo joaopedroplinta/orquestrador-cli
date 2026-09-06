@@ -7,10 +7,9 @@ import OutputFormatter from "./OutputFormatter.js";
 export interface StepCardProps {
   step: AgentRunResult;
   batchPrefix?: string;
-  mascotFace?: string;
 }
 
-export default function StepCard({ step, batchPrefix = "", mascotFace }: StepCardProps) {
+export default function StepCard({ step, batchPrefix = "" }: StepCardProps) {
   const borderColor = agentColor(step.agent);
   const durationSec = (step.durationMs / 1000).toFixed(2);
   const usage = usageLine(step.usage);
@@ -25,7 +24,6 @@ export default function StepCard({ step, batchPrefix = "", mascotFace }: StepCar
     >
       <Box justifyContent="space-between">
         <Box>
-          {mascotFace && <Text>{mascotFace} </Text>}
           {batchPrefix.length > 0 && <Text dimColor>{batchPrefix}</Text>}
           <Text bold color={borderColor}>
             [{step.agent}]

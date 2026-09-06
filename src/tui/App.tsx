@@ -3,9 +3,11 @@ import { basename } from "node:path";
 import { Box, Static, Text, useApp } from "ink";
 import Spinner from "ink-spinner";
 import { Fragment, useCallback, useEffect, useState } from "react";
-import { AGENT_REGISTRY } from "../agents/registry.js";
+import { AGENT_REGISTRY, isAgentName } from "../agents/registry.js";
 import { runPipeline, runPipelines } from "../orchestrator/pipeline.js";
 import { parseTaskAgentPrefix, planTask } from "../orchestrator/router.js";
+import { runTeam, type TeamState } from "../team/coordinator.js";
+import { formatTeamEvent } from "../team/presentation.js";
 import { formatUsdCost, totalCostUsd, usageLine } from "../reporting.js";
 import { computeSessionStats, exportSessionToFile } from "../sessionStats.js";
 import { listRuns } from "../storage/history.js";
@@ -26,11 +28,10 @@ import {
   SLASH_COMMANDS,
   type ModeState,
 } from "./commands.js";
-import { MascotBanner, MascotSpinner } from "./Mascot.js";
-import { mascotFaceFor, type MascotOutcome } from "./mascot.js";
 import OutputFormatter from "./OutputFormatter.js";
 import PromptInput from "./PromptInput.js";
 import StepCard from "./StepCard.js";
+import TeamCard from "./TeamCard.js";
 
 /** Tarefas separadas por ";" numa linha só ganham essa marca pra mostrar "Tarefa i/N" no transcript. */
 interface BatchTag {
@@ -39,11 +40,13 @@ interface BatchTag {
 }
 
 type TranscriptEntry =
-  | { kind: "banner"; id: string; mascotEnabled: boolean }
+  | { kind: "banner"; id: string }
   | { kind: "task"; id: string; text: string; agents: AgentName[]; batch?: BatchTag }
-  | { kind: "result"; id: string; steps: AgentRunResult[]; batch?: BatchTag; mascotFace?: string }
-  | { kind: "error"; id: string; message: string; batch?: BatchTag; mascotFace?: string }
-  | { kind: "cancelled"; id: string; message: string; mascotFace?: string }
+  | { kind: "team-task"; id: string; text: string }
+  | { kind: "team-result"; id: string; state: TeamState }
+  | { kind: "result"; id: string; steps: AgentRunResult[]; batch?: BatchTag }
+  | { kind: "error"; id: string; message: string; batch?: BatchTag }
+  | { kind: "cancelled"; id: string; message: string }
   | { kind: "info"; id: string; text: string }
   | { kind: "help"; id: string }
   | { kind: "status-card"; id: string; status: SystemStatus }
@@ -75,6 +78,12 @@ interface LiveTask {
   streamingOutput: string;
 }
 
+interface LiveTeam {
+  task: string;
+  id?: string;
+  events: string[];
+}
+
 function batchPrefix(batch: BatchTag | undefined): string {
   return batch ? `Tarefa ${batch.index}/${batch.total} · ` : "";
 }
@@ -85,12 +94,9 @@ function previewAgents(task: string, forcedAgent: AgentName | null): AgentName[]
   if (forcedAgent) return [forcedAgent];
   const prefix = parseTaskAgentPrefix(task);
   if (prefix.invalidAgentName) return [];
+  if (prefix.agents) return prefix.agents;
   if (prefix.agent) return [prefix.agent];
   return planTask(prefix.text).map((step) => step.agent);
-}
-
-function mascotFaceIfEnabled(outcome: MascotOutcome, mascotEnabled: boolean): string | undefined {
-  return mascotEnabled ? mascotFaceFor(outcome) : undefined;
 }
 
 function describeError(error: unknown): { kind: "error" | "cancelled"; message: string } {
@@ -105,23 +111,52 @@ function describeError(error: unknown): { kind: "error" | "cancelled"; message: 
 
 // ─── Componentes de UI ────────────────────────────────────────────────────────
 
-function Banner({ mascotEnabled }: { mascotEnabled: boolean }) {
+function Banner() {
   return (
     <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1} marginBottom={1}>
-      {mascotEnabled && <MascotBanner />}
-      <Text bold color="cyan">
-        ⚡ orquestrador
-      </Text>
-      <Text dimColor>Orquestra Claude Code + Antigravity numa mesma tarefa.</Text>
+      <Box justifyContent="space-between">
+        <Text bold color="cyan">⚡ orquestrador</Text>
+        <Text color="green">● 3 agentes prontos</Text>
+      </Box>
+      <Text dimColor>Planeje, execute e revise tarefas no mesmo projeto.</Text>
       <Text dimColor>
-        Digite uma tarefa e aperte Enter. Separe por <Text color="green">;</Text> pra rodar várias em paralelo.
-      </Text>
-      <Text dimColor>
-        <Text color="green">/help</Text> · <Text color="green">/status</Text> · <Text color="green">/summary</Text> ·{" "}
-        <Text color="green">/history</Text> · <Text color="green">/agent claude|antigravity|auto</Text> ·{" "}
-        <Text color="green">/exit</Text> · Ctrl+C
+        <Text color="green">tarefa</Text> executar · <Text color="green">;</Text> paralelo · <Text color="green">/team</Text> equipe · <Text color="green">/help</Text> comandos
       </Text>
     </Box>
+  );
+}
+
+function ComposerHint({ draft, mode }: { draft: string; mode: ModeState }) {
+  const trimmed = draft.trim();
+  if (!trimmed) {
+    return <Text dimColor>Ex.: implementar login com testes · ou /team implementar login completo</Text>;
+  }
+  if (trimmed.startsWith("/")) {
+    return <Text dimColor>Tab ou Enter completa · ↑/↓ escolhe um comando · Enter executa</Text>;
+  }
+
+  const tasks = trimmed.split(";").map((task) => task.trim()).filter(Boolean);
+  if (tasks.length > 1) {
+    return <Text color="cyan">↗ {tasks.length} tarefas serão executadas em paralelo</Text>;
+  }
+  const prefix = parseTaskAgentPrefix(trimmed);
+  if (prefix.invalidAgentName) {
+    return <Text color="red">⚠ Agente "{prefix.invalidAgentName}" não existe</Text>;
+  }
+  const agents = previewAgents(trimmed, mode.forcedAgent);
+  if (!agents.length) {
+    return <Text dimColor>Rota ainda ambígua · você poderá escolher um agente</Text>;
+  }
+  return (
+    <Text dimColor>
+      Rota sugerida: {" "}
+      {agents.map((agent, index) => (
+        <Fragment key={`${agent}-${index}`}>
+          {index > 0 && " → "}
+          <Text color={agentColor(agent)}>{agent}</Text>
+        </Fragment>
+      ))}
+    </Text>
   );
 }
 
@@ -160,8 +195,14 @@ function HelpView() {
           <Text color="white">pesquisar auth ; criar testes</Text>)
         </Text>
         <Text dimColor>
-          {"  • "}Use prefixos <Text color="magenta">claude:</Text> ou <Text color="blue">antigravity:</Text> para
+          {"  • "}Use prefixos <Text color="magenta">claude:</Text>, <Text color="blue">antigravity:</Text> ou <Text color="green">codex:</Text> para
           forçar um agente específico por tarefa
+        </Text>
+        <Text dimColor>
+          {"  • "}Encadeie agentes: antigravity&gt;codex&gt;claude: pesquisar, implementar e revisar
+        </Text>
+        <Text dimColor>
+          {"  • "}Use <Text color="green">/team implementar login completo</Text> para agentes coordenados em worktrees
         </Text>
         <Text dimColor>
           {"  • "}<Text color="green">/export json</Text> exporta todas as execuções para um arquivo JSON
@@ -224,6 +265,14 @@ function StatusCardView({ status }: { status: SystemStatus }) {
             <Text color="green">✔ {status.antigravity.version}</Text>
           ) : (
             <Text color="red">✖ Não encontrado no PATH ({status.antigravity.error})</Text>
+          )}
+        </Box>
+        <Box paddingLeft={2}>
+          <Text bold color="green">Codex (codex): </Text>
+          {status.codex.installed ? (
+            <Text color="green">✔ {status.codex.version}</Text>
+          ) : (
+            <Text color="red">✖ Não encontrado no PATH ({status.codex.error})</Text>
           )}
         </Box>
       </Box>
@@ -337,10 +386,6 @@ function StatusLine({
         <Text color={mode.autoMode ? "green" : undefined} dimColor={!mode.autoMode} bold={mode.autoMode}>
           {mode.autoMode ? "ligado" : "desligado"}
         </Text>
-        <Text dimColor>{"   mascote: "}</Text>
-        <Text color={mode.mascotEnabled ? "green" : undefined} dimColor={!mode.mascotEnabled}>
-          {mode.mascotEnabled ? "ligado" : "desligado"}
-        </Text>
       </Box>
       <Box>
         <Text dimColor>
@@ -356,8 +401,6 @@ function StatusLine({
 // ─── Componente principal App ─────────────────────────────────────────────────
 
 export interface AppProps {
-  /** Estado inicial do mascote — seedado por --no-mascot ou pelo .orquestradorrc do projeto (padrão: ligado). */
-  initialMascotEnabled?: boolean;
   /** Seed de ModeState.forcedAgent — vem do campo "agent" do .orquestradorrc, se houver. */
   initialForcedAgent?: AgentName;
   /** Seed de ModeState.routing — vem do campo "routing" do .orquestradorrc, se houver. */
@@ -367,14 +410,13 @@ export interface AppProps {
   /**
    * Repassados direto em todo runPipeline/runPipelines da sessão — vêm do
    * .orquestradorrc do projeto. Não fazem parte de ModeState (sem slash
-   * command pra mudar em runtime, diferente de agente/roteamento/auto/mascote).
+   * command pra mudar em runtime, diferente de agente/roteamento/auto).
    */
   maxRetries?: number;
   retryBaseDelayMs?: number;
 }
 
 export default function App({
-  initialMascotEnabled = true,
   initialForcedAgent,
   initialRouting,
   initialAutoMode,
@@ -382,9 +424,7 @@ export default function App({
   retryBaseDelayMs,
 }: AppProps = {}) {
   const { exit } = useApp();
-  const [transcript, setTranscript] = useState<TranscriptEntry[]>([
-    { kind: "banner", id: randomUUID(), mascotEnabled: initialMascotEnabled },
-  ]);
+  const [transcript, setTranscript] = useState<TranscriptEntry[]>([{ kind: "banner", id: randomUUID() }]);
   const [status, setStatus] = useState<Status>("idle");
   const [runningTask, setRunningTask] = useState<string | null>(null);
   const [pendingAgentPrompt, setPendingAgentPrompt] = useState<PendingAgentPrompt | undefined>();
@@ -395,11 +435,12 @@ export default function App({
     forcedAgent: initialForcedAgent ?? INITIAL_MODE_STATE.forcedAgent,
     routing: initialRouting ?? INITIAL_MODE_STATE.routing,
     autoMode: initialAutoMode ?? INITIAL_MODE_STATE.autoMode,
-    mascotEnabled: initialMascotEnabled,
   });
   const [streamingAgent, setStreamingAgent] = useState<AgentName | null>(null);
   const [streamingOutput, setStreamingOutput] = useState("");
   const [liveTasks, setLiveTasks] = useState<LiveTask[] | null>(null);
+  const [liveTeam, setLiveTeam] = useState<LiveTeam | null>(null);
+  const [draft, setDraft] = useState("");
 
   useEffect(() => {
     void getGitBranch().then(setGitBranch);
@@ -479,7 +520,6 @@ export default function App({
               kind: "result",
               id: randomUUID(),
               steps: [stepResult],
-              mascotFace: mascotFaceIfEnabled("success", mode.mascotEnabled),
             });
           },
           resolveAmbiguousAgent: (ambiguousTask) =>
@@ -495,14 +535,12 @@ export default function App({
             kind: "cancelled",
             id: randomUUID(),
             message: described.message,
-            mascotFace: mascotFaceIfEnabled("cancelled", mode.mascotEnabled),
           });
         } else {
           addEntry({
             kind: "error",
             id: randomUUID(),
             message: described.message,
-            mascotFace: mascotFaceIfEnabled("error", mode.mascotEnabled),
           });
         }
       } finally {
@@ -569,7 +607,6 @@ export default function App({
               id: randomUUID(),
               steps: [stepResult],
               batch: { index: index + 1, total },
-              mascotFace: mascotFaceIfEnabled("success", mode.mascotEnabled),
             });
           },
         });
@@ -582,7 +619,6 @@ export default function App({
               kind: "cancelled",
               id: randomUUID(),
               message: described.message,
-              mascotFace: mascotFaceIfEnabled("cancelled", mode.mascotEnabled),
             });
           } else {
             addEntry({
@@ -590,7 +626,6 @@ export default function App({
               id: randomUUID(),
               message: described.message,
               batch: { index: i + 1, total },
-              mascotFace: mascotFaceIfEnabled("error", mode.mascotEnabled),
             });
           }
         });
@@ -602,6 +637,41 @@ export default function App({
     [addEntry, mode, maxRetries, retryBaseDelayMs],
   );
 
+  const runTeamFromTui = useCallback(
+    async (task: string) => {
+      setStatus("running");
+      setRunningTask(task);
+      setLiveTeam({ task, events: ["Preparando equipe e verificando o repositório Git..."] });
+      addEntry({ kind: "team-task", id: randomUUID(), text: task });
+
+      try {
+        const result = await runTeam({
+          task,
+          onEvent: (event) => {
+            const formatted = formatTeamEvent(event);
+            const id = event.match(/^Equipe ([a-f0-9-]{36}):/)?.[1];
+            setLiveTeam((previous) => previous
+              ? { ...previous, id: id ?? previous.id, events: [...previous.events, formatted].slice(-8) }
+              : previous,
+            );
+          },
+        });
+        addEntry({ kind: "team-result", id: randomUUID(), state: result });
+      } catch (error) {
+        addEntry({
+          kind: "error",
+          id: randomUUID(),
+          message: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        setStatus("idle");
+        setRunningTask(null);
+        setLiveTeam(null);
+      }
+    },
+    [addEntry],
+  );
+
   const handleSubmit = useCallback(
     (value: string) => {
       const trimmed = value.trim();
@@ -609,7 +679,7 @@ export default function App({
 
       if (status === "asking-agent" && pendingAgentPrompt) {
         const answer = trimmed.toLowerCase();
-        if (answer === "claude" || answer === "antigravity") {
+        if (isAgentName(answer)) {
           pendingAgentPrompt.resolve(answer);
           setPendingAgentPrompt(undefined);
           setStatus("running");
@@ -624,7 +694,7 @@ export default function App({
         addEntry({
           kind: "info",
           id: randomUUID(),
-          text: 'Opção inválida. Digite "claude", "antigravity" ou "cancelar".',
+          text: 'Opção inválida. Digite "claude", "antigravity", "codex" ou "cancelar".',
         });
         return;
       }
@@ -711,16 +781,6 @@ export default function App({
           });
           return;
         }
-        case "toggle-mascot": {
-          const nextMode = applyModeCommand(mode, parsed);
-          setMode(nextMode);
-          addEntry({
-            kind: "info",
-            id: randomUUID(),
-            text: `Mascote ${nextMode.mascotEnabled ? "ligado" : "desligado"}.`,
-          });
-          return;
-        }
         case "error":
           addEntry({ kind: "error", id: randomUUID(), message: parsed.message });
           return;
@@ -730,9 +790,12 @@ export default function App({
         case "tasks":
           void runTasksInParallel(parsed.texts);
           return;
+        case "team":
+          void runTeamFromTui(parsed.task);
+          return;
       }
     },
-    [status, pendingAgentPrompt, mode, addEntry, exit, showHistory, runTask, runTasksInParallel],
+    [status, pendingAgentPrompt, mode, addEntry, exit, showHistory, runTask, runTasksInParallel, runTeamFromTui],
   );
 
   return (
@@ -744,7 +807,7 @@ export default function App({
       {status === "running" && liveTasks && (
         <Box flexDirection="column" marginTop={1}>
           <Text dimColor>
-            {mode.mascotEnabled ? <MascotSpinner /> : <Spinner type="dots" />} Rodando {liveTasks.length} tarefas em
+            <Spinner type="dots" /> Rodando {liveTasks.length} tarefas em
             paralelo... <Text dimColor>({elapsedSeconds}s)</Text>
           </Text>
           {liveTasks.map((t) => (
@@ -767,10 +830,21 @@ export default function App({
         </Box>
       )}
 
-      {status === "running" && !liveTasks && (
+      {status === "running" && liveTeam && (
+        <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor="cyan" paddingX={1}>
+          <Text color="cyan">
+            <Spinner type="dots" /> Equipe trabalhando <Text dimColor>({elapsedSeconds}s)</Text>
+          </Text>
+          <Text>{liveTeam.task}</Text>
+          {liveTeam.events.map((event, index) => <Text key={`${index}-${event}`} dimColor>{event}</Text>)}
+          {liveTeam.id && <Text dimColor>Em outro terminal: orquestrador team status {liveTeam.id} --messages</Text>}
+        </Box>
+      )}
+
+      {status === "running" && !liveTasks && !liveTeam && (
         <Box flexDirection="column" marginTop={1}>
           <Box>
-            <Text color="cyan">{mode.mascotEnabled ? <MascotSpinner /> : <Spinner type="dots" />}</Text>
+            <Text color="cyan"><Spinner type="dots" /></Text>
             <Text>
               {" "}
               Rodando: {runningTask} <Text dimColor>({elapsedSeconds}s)</Text>
@@ -796,12 +870,18 @@ export default function App({
       )}
 
       <Box marginTop={1} borderStyle="round" borderColor={status === "running" ? "gray" : "cyan"} paddingX={1}>
-        <Text color="green">{status === "asking-agent" ? "> " : "❯ "}</Text>
-        <PromptInput
-          onSubmit={handleSubmit}
-          disabled={status === "running"}
-          placeholder={status === "asking-agent" ? "claude | antigravity | cancelar" : "digite uma tarefa..."}
-        />
+        <Box flexDirection="column">
+          <Box>
+            <Text color="green">{status === "asking-agent" ? "> " : "❯ "}</Text>
+            <PromptInput
+              onSubmit={handleSubmit}
+              onChange={setDraft}
+              disabled={status === "running"}
+              placeholder={status === "asking-agent" ? "claude | antigravity | codex | cancelar" : "descreva uma tarefa..."}
+            />
+          </Box>
+          {status === "idle" && <ComposerHint draft={draft} mode={mode} />}
+        </Box>
       </Box>
     </Box>
   );
@@ -812,7 +892,7 @@ export default function App({
 function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
   switch (entry.kind) {
     case "banner":
-      return <Banner mascotEnabled={entry.mascotEnabled} />;
+      return <Banner />;
     case "help":
       return <HelpView />;
     case "status-card":
@@ -842,16 +922,20 @@ function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
           )}
         </Box>
       );
+    case "team-task":
+      return (
+        <Box marginTop={1} flexDirection="column">
+          <Text color="cyan" bold>☍ equipe</Text>
+          <Text>{entry.text}</Text>
+        </Box>
+      );
+    case "team-result":
+      return <TeamCard state={entry.state} />;
     case "result":
       return (
         <Box flexDirection="column">
           {entry.steps.map((step, i) => (
-            <StepCard
-              key={i}
-              step={step}
-              batchPrefix={batchPrefix(entry.batch)}
-              mascotFace={entry.mascotFace}
-            />
+            <StepCard key={i} step={step} batchPrefix={batchPrefix(entry.batch)} />
           ))}
         </Box>
       );
@@ -859,7 +943,6 @@ function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
       return (
         <Box marginTop={1}>
           <Text color="red">
-            {entry.mascotFace ? `${entry.mascotFace} ` : ""}
             {batchPrefix(entry.batch)}
             {entry.message}
           </Text>
@@ -868,10 +951,7 @@ function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
     case "cancelled":
       return (
         <Box marginTop={1}>
-          <Text color="yellow">
-            {entry.mascotFace ? `${entry.mascotFace} ` : ""}
-            {entry.message}
-          </Text>
+          <Text color="yellow">{entry.message}</Text>
         </Box>
       );
     case "info":

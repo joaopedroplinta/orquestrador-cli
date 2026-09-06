@@ -1,14 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { runAntigravity } from "./antigravity.js";
+import { runCodex } from "./codex.js";
 import { runClaudeCode } from "./claudeCode.js";
 import { AGENT_NAMES, AGENT_REGISTRY, isAgentName } from "./registry.js";
 
 describe("AGENT_REGISTRY", () => {
-  it("tem exatamente as entradas claude e antigravity", () => {
-    expect(Object.keys(AGENT_REGISTRY).sort()).toEqual(["antigravity", "claude"]);
+  it("tem as entradas claude, antigravity e codex", () => {
+    expect(Object.keys(AGENT_REGISTRY).sort()).toEqual(["antigravity", "claude", "codex"]);
   });
 
   it("aponta o runner de cada agente pro wrapper de verdade (mesma referência de função)", () => {
+    expect(AGENT_REGISTRY.codex.runner).toBe(runCodex);
     expect(AGENT_REGISTRY.claude.runner).toBe(runClaudeCode);
     expect(AGENT_REGISTRY.antigravity.runner).toBe(runAntigravity);
   });
@@ -21,12 +23,13 @@ describe("AGENT_REGISTRY", () => {
 
 describe("AGENT_NAMES", () => {
   it("é derivado das chaves do registro, não uma lista hardcoded separada", () => {
-    expect(AGENT_NAMES.sort()).toEqual(["antigravity", "claude"]);
+    expect(AGENT_NAMES.sort()).toEqual(["antigravity", "claude", "codex"]);
   });
 });
 
 describe("isAgentName", () => {
   it("reconhece os agentes de verdade", () => {
+    expect(isAgentName("codex")).toBe(true);
     expect(isAgentName("claude")).toBe(true);
     expect(isAgentName("antigravity")).toBe(true);
   });

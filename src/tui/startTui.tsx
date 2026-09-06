@@ -3,8 +3,6 @@ import type { AgentName, RoutingStrategy } from "../types.js";
 import App from "./App.js";
 
 export interface StartTuiOptions {
-  /** Seed de ModeState.mascotEnabled — vem de --no-mascot ou do .orquestradorrc do projeto. Padrão true. */
-  mascotEnabled?: boolean;
   /** Seed de ModeState.forcedAgent — vem do campo "agent" do .orquestradorrc, se houver. */
   initialForcedAgent?: AgentName;
   /** Seed de ModeState.routing — vem do campo "routing" do .orquestradorrc, se houver. */
@@ -21,7 +19,6 @@ export async function startTui(options: StartTuiOptions = {}): Promise<void> {
   // reduz bastante o volume de bytes escritos no terminal por frame.
   const { waitUntilExit } = render(
     <App
-      initialMascotEnabled={options.mascotEnabled}
       initialForcedAgent={options.initialForcedAgent}
       initialRouting={options.initialRouting}
       initialAutoMode={options.initialAutoMode}

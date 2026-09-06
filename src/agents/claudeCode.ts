@@ -15,6 +15,8 @@ export async function runClaudeCode(options: AgentRunOptions): Promise<AgentRunR
     command: "claude",
     args: ["-p", prompt, "--output-format", "json"],
     prompt,
+    cwd: options.cwd,
+    signal: options.signal,
     timeoutMs: options.timeoutMs,
     onChunk: options.onChunk,
     maxRetries: options.maxRetries,

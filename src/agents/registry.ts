@@ -1,5 +1,6 @@
 import { runAntigravity } from "./antigravity.js";
 import { runClaudeCode } from "./claudeCode.js";
+import { runCodex } from "./codex.js";
 import type { AgentName, AgentRunner } from "../types.js";
 
 export interface AgentDefinition {
@@ -21,6 +22,8 @@ export interface AgentDefinition {
 export const AGENT_REGISTRY: Record<AgentName, AgentDefinition> = {
   claude: { runner: runClaudeCode, streamsIncrementally: false },
   antigravity: { runner: runAntigravity, streamsIncrementally: true },
+  // O adaptador entrega somente a resposta após validar o turno JSONL completo.
+  codex: { runner: runCodex, streamsIncrementally: false },
 };
 
 export const AGENT_NAMES = Object.keys(AGENT_REGISTRY) as AgentName[];

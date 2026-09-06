@@ -5,6 +5,7 @@ import type { AgentName } from "../types.js";
 // ver "Adicionando um novo agente" no CLAUDE.md. Único lugar que define essa
 // cor — App.tsx e StepCard.tsx importam daqui em vez de duplicar o mapa.
 const AGENT_COLORS: Partial<Record<AgentName, string>> = {
+  codex: "green",
   claude: "magenta",
   antigravity: "blue",
 };
