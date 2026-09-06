@@ -84,6 +84,16 @@ interface LiveTeam {
   task: string;
   id?: string;
   events: string[];
+  /** Última saída de cada subtarefa em andamento, por id — as "lanes" ao vivo. */
+  lanes: Map<string, { agent: AgentName; output: string }>;
+}
+
+/** Cauda do output que cabe numa lane, pra não empurrar a tela inteira pra cima. */
+const LANE_TAIL_CHARS = 220;
+
+function laneTail(output: string): string {
+  const flat = output.replace(/\s+/g, " ").trim();
+  return flat.length > LANE_TAIL_CHARS ? `…${flat.slice(-LANE_TAIL_CHARS)}` : flat;
 }
 
 function batchPrefix(batch: BatchTag | undefined): string {
@@ -644,7 +654,7 @@ export default function App({
     async (task: string, options: { agents?: AgentName[]; concurrency?: number } = {}) => {
       setStatus("running");
       setRunningTask(task);
-      setLiveTeam({ task, events: ["Preparando equipe e verificando o repositório Git..."] });
+      setLiveTeam({ task, events: ["Preparando equipe e verificando o repositório Git..."], lanes: new Map() });
       addEntry({ kind: "team-task", id: randomUUID(), text: task });
 
       try {
@@ -655,10 +665,24 @@ export default function App({
           onEvent: (event) => {
             const formatted = formatTeamEvent(event);
             const id = event.match(/^Equipe ([a-f0-9-]{36}):/)?.[1];
-            setLiveTeam((previous) => previous
-              ? { ...previous, id: id ?? previous.id, events: [...previous.events, formatted].slice(-8) }
-              : previous,
-            );
+            // Uma subtarefa que terminou some das lanes ao vivo — o resultado
+            // dela já vai aparecer no TeamCard no fim.
+            const settled = event.match(/^\[([a-z][a-z0-9-]*)\] (?:concluída|failed|blocked|cancelled)/)?.[1];
+            setLiveTeam((previous) => {
+              if (!previous) return previous;
+              const lanes = settled ? new Map(previous.lanes) : previous.lanes;
+              if (settled) lanes.delete(settled);
+              return { ...previous, id: id ?? previous.id, lanes, events: [...previous.events, formatted].slice(-6) };
+            });
+          },
+          onTaskChunk: (taskId, agent, chunk) => {
+            setLiveTeam((previous) => {
+              if (!previous) return previous;
+              const lanes = new Map(previous.lanes);
+              const current = lanes.get(taskId);
+              lanes.set(taskId, { agent, output: (current?.output ?? "") + chunk });
+              return { ...previous, lanes };
+            });
           },
         });
         addEntry({ kind: "team-result", id: randomUUID(), state: result });
@@ -842,6 +866,22 @@ export default function App({
           </Text>
           <Text>{liveTeam.task}</Text>
           {liveTeam.events.map((event, index) => <Text key={`${index}-${event}`} dimColor>{event}</Text>)}
+          {/* Uma lane por subtarefa em andamento: sem isto a tela fica muda
+              enquanto N agentes trabalham por minutos. Caracteres de texto
+              puro em vez de Box com borda — mesmo cuidado com volume de bytes
+              por frame que o modo em lote já adota (ver bug #3 no CLAUDE.md). */}
+          {[...liveTeam.lanes.entries()].map(([taskId, lane]) => (
+            <Box key={taskId} flexDirection="column" marginTop={1}>
+              <Text>
+                {"┌ "}
+                <Text bold color={agentColor(lane.agent)}>{taskId} · {lane.agent}</Text>
+                {!AGENT_REGISTRY[lane.agent].streamsIncrementally && (
+                  <Text dimColor> (entrega tudo no fim)</Text>
+                )}
+              </Text>
+              {lane.output.length > 0 && <Text dimColor>{`│ ${laneTail(lane.output)}`}</Text>}
+            </Box>
+          ))}
           {liveTeam.id && <Text dimColor>Em outro terminal: orquestrador team status {liveTeam.id} --messages</Text>}
         </Box>
       )}

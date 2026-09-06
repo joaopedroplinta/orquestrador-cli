@@ -65,6 +65,14 @@ export interface TeamOptions {
   directory?: string;
   signal?: AbortSignal;
   onEvent?: (event: string) => void;
+  /**
+   * Output do agente conforme ele escreve, identificado pela subtarefa dona.
+   * Só é streaming de verdade para agentes com `streamsIncrementally` no
+   * registro (hoje: antigravity). Para os demais o texto chega de uma vez ao
+   * final — repassamos o que realmente acontece em vez de simular revelação
+   * progressiva, que com N tarefas concorrentes só disputaria a tela.
+   */
+  onTaskChunk?: (taskId: string, agent: AgentName, chunk: string) => void;
   /** Injeção dos adaptadores permite testar concorrência e Git real sem chamar modelos. */
   runners?: Record<AgentName, AgentRunner>;
   /** Comando sem shell executado antes de cada subtarefa, por exemplo ["npm", "ci"]. */
@@ -184,6 +192,9 @@ export async function runTeam(options: TeamOptions): Promise<TeamState> {
         controller.signal.throwIfAborted();
         task.result = await runner(task.agent)({
           cwd: task.worktree, signal: controller.signal, timeoutMs: options.timeoutMs ?? 300_000, maxRetries: 0,
+          onChunk: options.onTaskChunk
+            ? (chunk) => options.onTaskChunk!(task.id, task.agent, chunk)
+            : undefined,
           prompt: [
             `Objetivo da equipe: ${options.task}`,
             `Sua identidade: ${task.id} (${task.agent}). Sua responsabilidade: ${task.task}`,

@@ -1,14 +1,57 @@
 import { readFileSync } from "node:fs";
+import { open, stat } from "node:fs/promises";
+import { join } from "node:path";
 import type { Command } from "commander";
 import { isAgentName } from "../agents/registry.js";
 import type { TeamConfig } from "../config.js";
-import { cleanupTeam, isTeamInterrupted, listTeams, readTeam, recoverTeam, runTeam, sendToTeam } from "./coordinator.js";
+import { cleanupTeam, DEFAULT_TEAM_DIRECTORY, isTeamInterrupted, listTeams, readTeam, recoverTeam, runTeam, sendToTeam } from "./coordinator.js";
 import { parseTeamPlan } from "./plan.js";
 import { formatTeamEvent, renderTeamDashboard } from "./presentation.js";
 
 function fail(error: unknown) {
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
+}
+
+/**
+ * Acompanha `events.jsonl` ao vivo, de outro terminal. Só é possível porque a
+ * F0 separou o log de eventos append-only do snapshot de estado: seguir o
+ * arquivo é ler o que foi acrescentado, sem reparsear o estado inteiro.
+ *
+ * Faz polling do tamanho em vez de `fs.watch`: o arquivo é escrito por OUTRO
+ * processo, e a semântica de watch entre processos varia por plataforma —
+ * checar o tamanho a cada 300ms é previsível em todo lugar e barato.
+ */
+async function followTeamEvents(id: string): Promise<void> {
+  const path = join(DEFAULT_TEAM_DIRECTORY, id, "events.jsonl");
+  console.log(`\nAcompanhando ${path} — Ctrl+C para sair.\n`);
+  let offset = 0;
+  for (;;) {
+    let size = 0;
+    try { size = (await stat(path)).size; } catch { size = 0; }
+    if (size > offset) {
+      const handle = await open(path, "r");
+      try {
+        const { buffer, bytesRead } = await handle.read({ buffer: Buffer.alloc(size - offset), position: offset });
+        offset += bytesRead;
+        for (const line of buffer.subarray(0, bytesRead).toString("utf8").split("\n").filter(Boolean)) {
+          try {
+            const { at, event } = JSON.parse(line) as { at: string; event: string };
+            console.log(`${at.slice(11, 19)}  ${formatTeamEvent(event)}`);
+          } catch { /* linha parcial: a próxima passagem relê a partir do offset não consumido */ }
+        }
+      } finally { await handle.close(); }
+    }
+    // Termina sozinho quando a equipe chega a um estado terminal.
+    try {
+      const state = readTeam(id);
+      if (!["planning", "running", "integrating"].includes(state.status)) {
+        console.log(`\nEquipe ${state.status}.`);
+        return;
+      }
+    } catch { /* estado ainda não legível; segue acompanhando */ }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
 }
 
 export function registerTeamCommands(program: Command, config?: TeamConfig): void {
@@ -68,10 +111,12 @@ export function registerTeamCommands(program: Command, config?: TeamConfig): voi
     .description("Mostra tarefas, mensagens e caminhos preservados de uma equipe")
     .option("--messages", "Inclui as últimas cinco mensagens entre agentes")
     .option("--json", "Emite o estado completo em JSON para automação")
-    .action((id: string, opts: { messages?: boolean; json?: boolean }) => {
+    .option("--follow", "Acompanha os eventos da equipe ao vivo, de outro terminal (Ctrl+C para sair)")
+    .action(async (id: string, opts: { messages?: boolean; json?: boolean; follow?: boolean }) => {
       try {
         const state = readTeam(id);
         console.log(opts.json ? JSON.stringify(state, null, 2) : renderTeamDashboard(state, opts.messages));
+        if (opts.follow) await followTeamEvents(id);
       } catch (error) { fail(error); }
     });
   team.command("send <id> <destinatario> <mensagem>")
