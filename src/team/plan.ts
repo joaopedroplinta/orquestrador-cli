@@ -7,6 +7,13 @@ export interface TeamTask {
   task: string;
   dependsOn: string[];
   /**
+   * Condição verificável de "pronto" (ex.: "npm test passa e GET /health
+   * responde 200"). Opcional; entra no prompt do agente, que é instruído a
+   * verificá-la antes de concluir. Força o planner a declarar um critério em
+   * vez de deixar "pronto" a critério de cada agente.
+   */
+  acceptance?: string;
+  /**
    * Caminhos que esta subtarefa pode alterar, em glob (`src/api/**`).
    * Opcional: um plano sem `owns` roda como antes, sem checagem de
    * sobreposição — é assim que planos anteriores continuam válidos.
@@ -107,6 +114,9 @@ export function parseTeamPlan(value: unknown, allowedAgents?: AgentName[]): Team
     if (!Array.isArray(deps) || !deps.every((id) => typeof id === "string") || new Set(deps).size !== deps.length) {
       throw new Error(`Dependências inválidas: ${t.id}.`);
     }
+    if (t.acceptance !== undefined && (typeof t.acceptance !== "string" || !t.acceptance.trim() || t.acceptance.length > 2000)) {
+      throw new Error(`Critério de aceite inválido: ${t.id}.`);
+    }
     const owns = t.owns;
     if (owns !== undefined) {
       if (!Array.isArray(owns) || !owns.every((path) => typeof path === "string" && path.trim() && !path.includes("\0"))) {
@@ -118,6 +128,7 @@ export function parseTeamPlan(value: unknown, allowedAgents?: AgentName[]): Team
     }
     return {
       id: t.id, agent: t.agent, task: t.task.trim(), dependsOn: deps,
+      ...(t.acceptance ? { acceptance: (t.acceptance as string).trim() } : {}),
       ...(owns ? { owns: owns.map((path) => path.trim()) } : {}),
     };
   });
@@ -164,9 +175,10 @@ export function plannerPrompt(task: string, agents: AgentName[]): string {
     "Subtarefas independentes executarão simultaneamente em worktrees Git isoladas.",
     "Se uma tarefa precisar dos arquivos/resultados de outra, declare dependsOn.",
     'Declare em "owns" os caminhos que cada subtarefa vai alterar (globs, ex.: "src/api/**").',
+    'Declare em "acceptance" como verificar que a subtarefa terminou (ex.: "npm test passa e GET /health responde 200").',
     "Duas subtarefas SEM dependência entre si não podem declarar caminhos que se cruzam — o plano é",
     "rejeitado automaticamente se isso acontecer. Separe os caminhos ou declare a dependência.",
-    'Responda somente JSON: {"tasks":[{"id":"backend","agent":"codex","task":"...","dependsOn":[],"owns":["src/api/**"]}]}',
+    'Responda somente JSON: {"tasks":[{"id":"backend","agent":"codex","task":"...","dependsOn":[],"owns":["src/api/**"],"acceptance":"..."}]}',
     "Use no máximo 12 subtarefas e ids únicos em letras minúsculas, números e hífen.",
     `Tarefa: ${task}`,
   ].join("\n\n");

@@ -217,6 +217,7 @@ export async function runTeam(options: TeamOptions): Promise<TeamState> {
           prompt: [
             `Objetivo da equipe: ${options.task}`,
             `Sua identidade: ${task.id} (${task.agent}). Sua responsabilidade: ${task.task}`,
+            ...(task.acceptance ? [`Critério de aceite — verifique isto ANTES de concluir: ${task.acceptance}`] : []),
             `Colegas: ${state.tasks.map((t) => `${t.id} (${t.agent}): ${t.task}`).join("\n")}`,
             "Trabalhe apenas nesta worktree. Não faça commits/merges. Use a caixa .orquestrador-team somente pelo utilitário descrito abaixo; não edite sua infraestrutura. O coordenador guarda seus arquivos ao terminar.",
             "As alterações das dependências declaradas já foram integradas nesta worktree. Outras worktrees são independentes.",

@@ -50,6 +50,60 @@ Cada tarefa recebe uma branch e worktree próprias; `process.cwd()` global não 
 alterado. Quando as dependências terminam, seus commits são integrados na
 worktree da tarefa dependente e seus resumos entram no contexto do agente.
 
+**Posse de arquivos (`owns`):** cada subtarefa pode declarar quais caminhos vai
+alterar. Duas subtarefas **sem dependência entre si** que declarem caminhos
+cruzados fazem o plano ser **rejeitado antes de criar worktree ou chamar
+modelo** — sem isso, a colisão só apareceria no merge, depois de já ter pago
+duas execuções. A checagem é conservadora por fronteira de diretório
+(`src/api/**` e `src/api/x.ts` colidem; `src/api/**` e `src/apiary/**` não;
+`src/*.ts` e `src/*.js` são tratados como colisão mesmo sem interseção real —
+o falso positivo só obriga o plano a ser mais específico). `owns` é opcional:
+um plano sem ele roda como antes, sem checagem.
+
+**Critério de aceite (`acceptance`):** condição verificável de "pronto" que
+entra no prompt do agente, que é instruído a checá-la antes de concluir.
+
+```json
+{"id":"backend","agent":"codex","task":"Implementar API","dependsOn":[],
+ "owns":["src/api/**"],"acceptance":"npm test passa e GET /health responde 200"}
+```
+
+**Orçamento (`--max-cost`, `--max-duration`):** tetos para execução sem
+supervisão. Ao atingir o limite, o lote é interrompido e worktrees/resultados
+parciais são preservados como em qualquer cancelamento; a checagem acontece a
+cada conclusão de subtarefa, porque interromper no meio de uma chamada de
+modelo não devolveria o gasto. **A cobertura de custo é parcial por natureza**:
+só o claude reporta custo em dólar (codex reporta tokens sem custo, antigravity
+não reporta nada, e nunca inventamos um preço). Quando nem toda etapa reportou,
+a mensagem de parada diz sobre quantas etapas o número foi medido e avisa que o
+gasto real é maior — em vez de apresentar um valor parcial como se fosse o total.
+
+```bash
+node dist/cli.js team run "implementar login" --max-cost 5 --max-duration 900000
+```
+
+**Quadro de contratos:** o canal de mensagens é best-effort — entrega não é
+leitura — então um contrato de API que só vive numa mensagem pode nunca ser
+lido, e dois agentes definem a mesma interface de formas divergentes sem saber.
+Cada worktree recebe também um `contracts.cjs`, apontando para um quadro único
+da equipe:
+
+```bash
+node .orquestrador-team/contracts.cjs list
+node .orquestrador-team/contracts.cjs set auth.token "JWT com claim sub"
+node .orquestrador-team/contracts.cjs get auth.token
+```
+
+Chave nova é livre e o dono reescreve a sua; quem tenta **redefinir a chave de
+outra subtarefa é recusado**, com o valor atual na mensagem, e precisa se
+adequar ou combinar a mudança antes. Como N processos escrevem no mesmo
+arquivo, a exclusão mútua é um lockfile de verdade. A identidade do escritor é
+embutida na geração do helper, por worktree — um agente não se passa por outro
+mexendo no ambiente.
+
+**Acompanhar de outro terminal:** `team status <id> --follow` segue os eventos
+ao vivo até a equipe chegar a um estado terminal.
+
 **Mensagens durante a execução:** cada worktree recebe um utilitário local,
 que não exige instalar dependências:
 
@@ -419,7 +473,19 @@ Duas diferenças importantes em relação ao modo de uma tarefa só:
 orquestrador run "pesquisar X" "corrigir Y" "implementar Z"
 # roda as três ao mesmo tempo; se "corrigir Y" falhar, "pesquisar X" e
 # "implementar Z" ainda são reportadas normalmente
+
+orquestrador run "t1" "t2" "t3" "t4" "t5" --concurrency 2
+# no máximo 2 processos de agente ativos por vez
 ```
+
+`--concurrency` limita quantas rodam ao mesmo tempo (padrão 4). Sem teto, um
+lote grande subiria um processo de CLI de agente por tarefa, todos de uma vez.
+
+> ⚠️ **Estas tarefas compartilham o diretório atual.** Elas rodam de verdade em
+> paralelo, sem lock: se duas tocarem o mesmo arquivo, uma sobrescreve a outra
+> sem aviso. Dentro de um repositório git o comando avisa disso. Para trabalho
+> concorrente que **altera arquivos**, use `orquestrador team run` — lá cada
+> subtarefa tem worktree própria e há uma etapa de integração.
 
 #### Agente por tarefa dentro de um lote (`agente:` no início da tarefa)
 
@@ -656,8 +722,24 @@ modo inicial da tela (ainda dá pra trocar depois com `/agent`/`/routing`/
   sequência, repassando o output de uma etapa como `context` de entrada da
   próxima. Loga cada etapa (sucesso ou erro) no histórico. `runPipelines()`
   roda várias tarefas independentes chamando `runPipeline()` uma vez por
-  tarefa via `Promise.allSettled` — cada uma com seu próprio `runId`, sem
-  afetar as outras se uma falhar.
+  tarefa — cada uma com seu próprio `runId`, sem afetar as outras se uma
+  falhar.
+- **`src/orchestrator/scheduler.ts`** — o kernel de execução paralela que
+  `runPipelines()` e o modo `team` compartilham: semáforo de concorrência,
+  grafo de dependências e cancelamento em cascata. Agnóstico de agente, Git
+  e histórico — não importa nada de `agents/`, `team/` ou `storage/`; quem
+  chama decide o que uma "tarefa" faz. Antes existiam dois motores paralelos
+  independentes com garantias opostas (um sem teto, isolamento ou
+  cancelamento; o outro com tudo isso e nenhuma observabilidade), e unificá-los
+  é o que deu ao lote de `run` o cancelamento e o teto que só o `team` tinha.
+- **`src/team/`** — o modo de equipe: `coordinator.ts` (orquestra worktrees,
+  mailbox, contratos e integração, delegando o escalonamento ao kernel acima),
+  `plan.ts` (valida o DAG, a posse de arquivos e os critérios de aceite),
+  `worktrees.ts` (as chamadas de Git), `mailbox.ts` (mensagens best-effort
+  entre agentes), `contracts.ts` (o quadro de acordos com dono e lockfile),
+  `budget.ts` (tetos de custo/tempo) e `persistence.ts` (snapshot com debounce
+  + `events.jsonl` append-only, ambos assíncronos, para que o caminho quente
+  não trave o event loop).
 - **`src/agents/`** — wrappers finos em volta de `execa` que disparam
   `claude -p "..."` e `agy -p "..." --print-timeout 3m`, com timeout
   configurável e tratamento consistente de erro (timeout, comando não
