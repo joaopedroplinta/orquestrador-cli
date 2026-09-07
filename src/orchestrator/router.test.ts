@@ -135,3 +135,39 @@ describe("prefixos de colaboração", () => {
     expect(parseTaskAgentPrefix(task).invalidAgentName).toBeTruthy();
   });
 });
+
+describe("roteamento com agentes desabilitados", () => {
+  it("uma tarefa de pesquisa vai pro próximo da preferência quando antigravity está fora", () => {
+    expect(planTask("pesquisar node", ["claude", "codex"])).toEqual([{ agent: "claude", prompt: "pesquisar node" }]);
+  });
+
+  it("uma tarefa de implementação vai pro codex quando claude está fora", () => {
+    expect(planTask("implementar endpoint", ["antigravity", "codex"])).toEqual([
+      { agent: "codex", prompt: "implementar endpoint" },
+    ]);
+  });
+
+  it("uma tarefa de pesquisa + implementação continua com duas etapas distintas sem antigravity", () => {
+    expect(planTask("pesquisar e implementar", ["claude", "codex"]).map((step) => step.agent)).toEqual([
+      "claude",
+      "codex",
+    ]);
+  });
+
+  it("com um agente só, pesquisa + implementação colapsa numa etapa", () => {
+    expect(planTask("pesquisar e implementar", ["codex"]).map((step) => step.agent)).toEqual(["codex"]);
+  });
+
+  it("classifyTaskWithClaude nem chama o claude quando o próprio claude está desabilitado", async () => {
+    const plan = await classifyTaskWithClaude("qualquer coisa", ["antigravity", "codex"]);
+    expect(plan).toBeNull();
+    expect(mockedRunClaudeCode).not.toHaveBeenCalled();
+  });
+
+  it("classificação bem-sucedida respeita quem está habilitado ao montar o plano", async () => {
+    mockedRunClaudeCode.mockResolvedValue(fakeClassifyResult("pesquisa"));
+    expect(await classifyTaskWithClaude("tarefa", ["claude", "codex"])).toEqual([
+      { agent: "claude", prompt: "tarefa" },
+    ]);
+  });
+});

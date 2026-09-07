@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { Box, Static, Text, useApp } from "ink";
 import Spinner from "ink-spinner";
 import { Fragment, useCallback, useEffect, useState } from "react";
+import { agentsForRoles } from "../agents/availability.js";
 import { AGENT_NAMES, AGENT_REGISTRY, isAgentName } from "../agents/registry.js";
 import { runPipeline, runPipelines } from "../orchestrator/pipeline.js";
 import { parseTaskAgentPrefix, planTask } from "../orchestrator/router.js";
@@ -24,6 +25,9 @@ import {
 import { agentColor } from "./agentColors.js";
 import {
   applyModeCommand,
+  describeAgents,
+  disabledIn,
+  toggleAgents,
   INITIAL_MODE_STATE,
   parseInput,
   SLASH_COMMANDS,
@@ -41,7 +45,7 @@ interface BatchTag {
 }
 
 type TranscriptEntry =
-  | { kind: "banner"; id: string; projectPath: string }
+  | { kind: "banner"; id: string; projectPath: string; agents: AgentName[] }
   | { kind: "task"; id: string; text: string; agents: AgentName[]; batch?: BatchTag }
   | { kind: "team-task"; id: string; text: string }
   | { kind: "team-result"; id: string; state: TeamState }
@@ -50,6 +54,7 @@ type TranscriptEntry =
   | { kind: "cancelled"; id: string; message: string }
   | { kind: "info"; id: string; text: string }
   | { kind: "help"; id: string }
+  | { kind: "agents-card"; id: string; agents: { agent: AgentName; enabled: boolean }[] }
   | { kind: "status-card"; id: string; status: SystemStatus }
   /** `runs` vem resolvido de fora: ler SQLite dentro do render bloqueia o loop a cada re-render. */
   | { kind: "summary-card"; id: string; runs: HistoryRun[] }
@@ -111,13 +116,13 @@ function batchPrefix(batch: BatchTag | undefined): string {
 
 // Prévia de rota mostrada assim que a tarefa é digitada, antes do pipeline
 // resolver de verdade — precisa refletir a mesma prioridade de runPipeline().
-function previewAgents(task: string, forcedAgent: AgentName | null): AgentName[] {
-  if (forcedAgent) return [forcedAgent];
+function previewAgents(task: string, mode: ModeState): AgentName[] {
+  if (mode.forcedAgent) return [mode.forcedAgent];
   const prefix = parseTaskAgentPrefix(task);
   if (prefix.invalidAgentName) return [];
   if (prefix.agents) return prefix.agents;
   if (prefix.agent) return [prefix.agent];
-  return planTask(prefix.text).map((step) => step.agent);
+  return planTask(prefix.text, mode.enabledAgents).map((step) => step.agent);
 }
 
 function describeError(error: unknown): { kind: "error" | "cancelled"; message: string } {
@@ -137,11 +142,12 @@ function describeError(error: unknown): { kind: "error" | "cancelled"; message: 
  * (o codex encaixota, mas é o único dos três). Um bloco de marca à esquerda e
  * as informações da sessão à direita, cada uma numa linha.
  */
-function Banner({ projectPath }: { projectPath: string }) {
+function Banner({ projectPath, agents }: { projectPath: string; agents: AgentName[] }) {
   const mark = ["  ▄▀▀▄  ", " ▀▄  ▄▀ ", "  ▀▄▄▀  "];
+  const off = AGENT_NAMES.length - agents.length;
   const info = [
     <Text key="n" bold color="cyan">orquestrador {VERSION}</Text>,
-    <Text key="a" dimColor>{AGENT_NAMES.length} agentes · {AGENT_NAMES.join(" · ")}</Text>,
+    <Text key="a" dimColor>{`${agents.length} agentes · ${agents.join(" · ")}${off ? ` · ${off} desligado(s)` : ""}`}</Text>,
     <Text key="p" dimColor>{projectPath}</Text>,
   ];
   return (
@@ -174,7 +180,7 @@ function ComposerHint({ draft, mode }: { draft: string; mode: ModeState }) {
   if (prefix.invalidAgentName) {
     return <Text color="red">⚠ Agente "{prefix.invalidAgentName}" não existe</Text>;
   }
-  const agents = previewAgents(trimmed, mode.forcedAgent);
+  const agents = previewAgents(trimmed, mode);
   if (!agents.length) {
     return <Text dimColor>Rota ainda ambígua · você poderá escolher um agente</Text>;
   }
@@ -381,7 +387,36 @@ function SummaryCardView({ runs }: { runs: HistoryRun[] }) {
   );
 }
 
+function AgentsCardView({ agents }: { agents: { agent: AgentName; enabled: boolean }[] }) {
+  const enabled = agents.filter((entry) => entry.enabled).map((entry) => entry.agent);
+  const [pesquisa, implementacao] = [
+    agentsForRoles(["pesquisa"], enabled)[0],
+    agentsForRoles(["implementacao"], enabled)[0],
+  ];
+
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} marginY={1}>
+      <Text bold color="cyan">Agentes</Text>
+      {agents.map(({ agent, enabled: on }) => (
+        <Box key={agent}>
+          <Text color={on ? agentColor(agent) : undefined} dimColor={!on}>
+            {`${on ? "●" : "○"} ${agent.padEnd(13)}`}
+          </Text>
+          <Text dimColor>{on ? "ligado" : "desligado"}</Text>
+        </Box>
+      ))}
+      {/* Quem cumpre cada papel AGORA — é a pergunta real depois de desligar
+          alguém ("e aí, quem faz pesquisa?"), não a lista em si. */}
+      <Box marginTop={1}>
+        <Text dimColor>{`Papéis: pesquisa → ${pesquisa ?? "—"} · implementação → ${implementacao ?? "—"}`}</Text>
+      </Box>
+      <Text dimColor>/agents off &lt;nome&gt; desliga · /agents on &lt;nome&gt; religa</Text>
+    </Box>
+  );
+}
+
 function StatusLine({ mode, gitBranch }: { mode: ModeState; gitBranch: string | null }) {
+  const off = disabledIn(mode);
   return (
     <Box flexDirection="column">
       {/* Uma linha só, abaixo do input: estado à esquerda, um ÚNICO ponteiro
@@ -402,6 +437,9 @@ function StatusLine({ mode, gitBranch }: { mode: ModeState; gitBranch: string | 
             {` · ${mode.routing}`}
           </Text>
           {mode.autoMode && <Text color="green"> · auto</Text>}
+          {off.length > 0 && (
+            <Text color="yellow">{` · ${mode.enabledAgents.length}/${AGENT_NAMES.length} agentes`}</Text>
+          )}
           {gitBranch && <Text dimColor>{` · ⎇ ${gitBranch}`}</Text>}
         </Box>
         <Text dimColor>/help para comandos</Text>
@@ -420,6 +458,11 @@ export interface AppProps {
   /** Seed de ModeState.autoMode — vem do campo "auto" do .orquestradorrc, se houver. */
   initialAutoMode?: boolean;
   /**
+   * Seed de ModeState.enabledAgents — todos menos "disabledAgents" do
+   * .orquestradorrc. Só o PONTO DE PARTIDA: "/agents on|off" muda em runtime.
+   */
+  initialEnabledAgents?: AgentName[];
+  /**
    * Repassados direto em todo runPipeline/runPipelines da sessão — vêm do
    * .orquestradorrc do projeto. Não fazem parte de ModeState (sem slash
    * command pra mudar em runtime, diferente de agente/roteamento/auto).
@@ -432,11 +475,19 @@ export default function App({
   initialForcedAgent,
   initialRouting,
   initialAutoMode,
+  initialEnabledAgents,
   maxRetries,
   retryBaseDelayMs,
 }: AppProps = {}) {
   const { exit } = useApp();
-  const [transcript, setTranscript] = useState<TranscriptEntry[]>([{ kind: "banner", id: randomUUID(), projectPath: shortenHome(process.cwd()) }]);
+  const [transcript, setTranscript] = useState<TranscriptEntry[]>([
+    {
+      kind: "banner",
+      id: randomUUID(),
+      projectPath: shortenHome(process.cwd()),
+      agents: initialEnabledAgents ?? INITIAL_MODE_STATE.enabledAgents,
+    },
+  ]);
   const [status, setStatus] = useState<Status>("idle");
   const [runningTask, setRunningTask] = useState<string | null>(null);
   const [pendingAgentPrompt, setPendingAgentPrompt] = useState<PendingAgentPrompt | undefined>();
@@ -447,6 +498,7 @@ export default function App({
     forcedAgent: initialForcedAgent ?? INITIAL_MODE_STATE.forcedAgent,
     routing: initialRouting ?? INITIAL_MODE_STATE.routing,
     autoMode: initialAutoMode ?? INITIAL_MODE_STATE.autoMode,
+    enabledAgents: initialEnabledAgents ?? INITIAL_MODE_STATE.enabledAgents,
   });
   const [streamingAgent, setStreamingAgent] = useState<AgentName | null>(null);
   const [streamingOutput, setStreamingOutput] = useState("");
@@ -489,7 +541,7 @@ export default function App({
 
   const runTask = useCallback(
     async (task: string) => {
-      const agents = previewAgents(task, mode.forcedAgent);
+      const agents = previewAgents(task, mode);
       setStatus("running");
       setRunningTask(task);
       addEntry({ kind: "task", id: randomUUID(), text: task, agents });
@@ -500,6 +552,7 @@ export default function App({
           forceAgent: mode.forcedAgent ?? undefined,
           routing: mode.routing,
           auto: mode.autoMode,
+          enabledAgents: mode.enabledAgents,
           maxRetries,
           retryBaseDelayMs,
           onStepStart: (agent) => {
@@ -574,7 +627,7 @@ export default function App({
       );
 
       for (const [i, task] of texts.entries()) {
-        const agents = previewAgents(task, mode.forcedAgent);
+        const agents = previewAgents(task, mode);
         addEntry({ kind: "task", id: randomUUID(), text: task, agents, batch: { index: i + 1, total } });
       }
 
@@ -588,6 +641,7 @@ export default function App({
           forceAgent: mode.forcedAgent ?? undefined,
           routing: mode.routing,
           auto: mode.autoMode,
+          enabledAgents: mode.enabledAgents,
           maxRetries,
           retryBaseDelayMs,
           onTaskStepStart: (index, agent) => {
@@ -659,7 +713,7 @@ export default function App({
       try {
         const result = await runTeam({
           task,
-          agents: options.agents,
+          agents: options.agents ?? mode.enabledAgents,
           concurrency: options.concurrency,
           onEvent: (event) => {
             const formatted = formatTeamEvent(event);
@@ -774,7 +828,36 @@ export default function App({
           }
           addEntry({ kind: "info", id: randomUUID(), text: "Histórico visual limpo." });
           return;
+        case "list-agents":
+          addEntry({ kind: "agents-card", id: randomUUID(), agents: describeAgents(mode) });
+          return;
+        case "toggle-agents": {
+          const { mode: nextMode, error } = toggleAgents(mode, parsed.agents, parsed.enabled);
+          if (error) {
+            addEntry({ kind: "error", id: randomUUID(), message: error });
+            return;
+          }
+          setMode(nextMode);
+          const droppedForced = mode.forcedAgent && !nextMode.forcedAgent;
+          addEntry({
+            kind: "info",
+            id: randomUUID(),
+            text:
+              `${parsed.agents.join(", ")} ${parsed.enabled ? "religado(s)" : "desligado(s)"}. ` +
+              `Em jogo: ${nextMode.enabledAgents.join(", ")}.` +
+              (droppedForced ? ` O agente forçado (${mode.forcedAgent}) saiu de jogo — voltando ao roteamento automático.` : ""),
+          });
+          return;
+        }
         case "set-agent": {
+          if (parsed.agent && !mode.enabledAgents.includes(parsed.agent)) {
+            addEntry({
+              kind: "error",
+              id: randomUUID(),
+              message: `"${parsed.agent}" está desligado. Religue com "/agents on ${parsed.agent}" antes de forçá-lo.`,
+            });
+            return;
+          }
           const nextMode = applyModeCommand(mode, parsed);
           setMode(nextMode);
           addEntry({
@@ -944,9 +1027,11 @@ export default function App({
 function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
   switch (entry.kind) {
     case "banner":
-      return <Banner projectPath={entry.projectPath} />;
+      return <Banner projectPath={entry.projectPath} agents={entry.agents} />;
     case "help":
       return <HelpView />;
+    case "agents-card":
+      return <AgentsCardView agents={entry.agents} />;
     case "status-card":
       return <StatusCardView status={entry.status} />;
     case "summary-card":

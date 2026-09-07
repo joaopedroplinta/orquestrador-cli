@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { isAgentName } from "./agents/registry.js";
+import { AGENT_NAMES, isAgentName } from "./agents/registry.js";
 import type { AgentName, RoutingStrategy } from "./types.js";
 
 export const CONFIG_FILENAME = ".orquestradorrc";
@@ -19,6 +19,12 @@ export interface TeamConfig {
 export interface OrquestradorConfig {
   /** Equivalente a --agent: força esse agente pra toda tarefa rodada neste projeto. */
   agent?: AgentName;
+  /**
+   * Agentes fora de jogo neste projeto (cota esgotada, CLI não instalado). O
+   * roteamento reatribui o papel deles pro próximo agente da preferência, e
+   * forçá-los explicitamente vira erro. Nunca pode tirar todos.
+   */
+  disabledAgents?: AgentName[];
   /** Equivalente a --routing. */
   routing?: RoutingStrategy;
   /** Equivalente a --auto. */
@@ -56,6 +62,22 @@ export function parseOrquestradorConfig(raw: string): { config: OrquestradorConf
   if ("agent" in obj) {
     if (typeof obj.agent === "string" && isAgentName(obj.agent)) config.agent = obj.agent;
     else warnings.push(`"agent": ${JSON.stringify(obj.agent)} inválido (use "claude", "antigravity" ou "codex") — ignorado.`);
+  }
+  if ("disabledAgents" in obj) {
+    const value = obj.disabledAgents;
+    if (
+      Array.isArray(value) &&
+      value.every((agent) => typeof agent === "string" && isAgentName(agent)) &&
+      new Set(value).size === value.length &&
+      value.length < AGENT_NAMES.length
+    ) {
+      config.disabledAgents = value as AgentName[];
+    } else {
+      warnings.push(
+        `"disabledAgents": ${JSON.stringify(value)} inválido (use uma lista sem repetição de ${AGENT_NAMES.join(", ")}, ` +
+          "e nunca todos ao mesmo tempo) — ignorado.",
+      );
+    }
   }
   if ("routing" in obj) {
     if (isRoutingStrategyValue(obj.routing)) config.routing = obj.routing;

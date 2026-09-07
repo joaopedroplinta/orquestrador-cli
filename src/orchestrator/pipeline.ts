@@ -1,3 +1,4 @@
+import { DEFAULT_ENABLED_AGENTS } from "../agents/availability.js";
 import { AGENT_REGISTRY } from "../agents/registry.js";
 import { finishRun, logStep, startRun } from "../storage/history.js";
 import {
@@ -55,6 +56,13 @@ export interface RunPipelineOptions {
   routing?: RoutingStrategy;
   /** Tarefa ambígua com routing="keyword": tenta classificar via claude antes de cair pro fallback interativo. Sem efeito com routing="classify" (a classificação já sempre acontece). */
   auto?: boolean;
+  /**
+   * Quem pode receber uma etapa. Omitido, são todos os do registro. Um agente
+   * fora daqui (cota esgotada, CLI não instalado) nunca é escolhido pelo
+   * roteamento, e forçá-lo explicitamente vira erro em vez de uma chamada que
+   * o usuário já sabe que vai falhar.
+   */
+  enabledAgents?: readonly AgentName[];
   /** Chamado quando a tarefa é ambígua e `auto` não resolveu. Retorna `null` pra cancelar. */
   resolveAmbiguousAgent?: (task: string) => Promise<AgentName | null>;
   /** Chamado antes de cada etapa do plano começar a rodar. */
@@ -100,6 +108,21 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
   if (!task.trim()) throw new Error("A tarefa não pode estar vazia.");
   const forceAgent = options.forceAgent ?? prefix.agent;
   const routing = options.routing ?? "keyword";
+  const enabled = options.enabledAgents ?? DEFAULT_ENABLED_AGENTS;
+  if (enabled.length === 0) throw new Error("Nenhum agente habilitado — habilite pelo menos um pra rodar tarefas.");
+
+  // Um agente escolhido a dedo (--agent, prefixo, sequência) que está
+  // desabilitado é erro explícito, não substituição silenciosa: o usuário
+  // pediu AQUELE agente, então trocar por outro seria fazer outra coisa.
+  for (const requested of [forceAgent, ...(prefix.agents ?? [])]) {
+    if (requested && !enabled.includes(requested)) {
+      throw new Error(
+        `O agente "${requested}" está desabilitado nesta sessão. ` +
+          `Habilitados: ${enabled.join(", ")}. Reabilite com "/agents on ${requested}" na tela interativa, ` +
+          `ou tire "${requested}" de "disabledAgents" no .orquestradorrc.`,
+      );
+    }
+  }
 
   let plan: TaskStep[];
   if (forceAgent) {
@@ -119,24 +142,27 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
     // Pula planTask() inteiramente — toda tarefa passa pela IA, não só a
     // que a keyword deixou ambígua. --auto não entra em jogo aqui: a
     // classificação já é sempre a primeira (e única) tentativa.
-    plan = (await classifyTaskWithClaude(task)) ?? [];
+    plan = (await classifyTaskWithClaude(task, enabled)) ?? [];
   } else {
-    plan = planTask(task);
+    plan = planTask(task, enabled);
     if (plan.length === 0 && options.auto) {
-      plan = (await classifyTaskWithClaude(task)) ?? [];
+      plan = (await classifyTaskWithClaude(task, enabled)) ?? [];
     }
   }
 
   if (plan.length === 0) {
     if (!options.resolveAmbiguousAgent) {
       throw new Error(
-        `Não foi possível decidir qual agente usar pra: "${task}". Especifique com --agent claude|antigravity|codex.`,
+        `Não foi possível decidir qual agente usar pra: "${task}". Especifique com --agent ${enabled.join("|")}.`,
       );
     }
 
     const chosen = await options.resolveAmbiguousAgent(task);
     if (!chosen) {
       throw new PipelineCancelledError(task);
+    }
+    if (!enabled.includes(chosen)) {
+      throw new Error(`O agente "${chosen}" está desabilitado nesta sessão. Habilitados: ${enabled.join(", ")}.`);
     }
     plan = [{ agent: chosen, prompt: task }];
   }
@@ -216,6 +242,8 @@ export interface RunManyOptions {
   forceAgent?: AgentName;
   routing?: RoutingStrategy;
   auto?: boolean;
+  /** Repassado igual pra cada tarefa do lote — ver RunPipelineOptions.enabledAgents. */
+  enabledAgents?: readonly AgentName[];
   /**
    * Máximo de tarefas simultâneas — padrão `DEFAULT_CONCURRENCY`. Sem teto,
    * um lote de 20 subia 20 processos de CLI de agente de uma vez.
@@ -263,6 +291,7 @@ export async function runPipelines(options: RunManyOptions): Promise<RunManyResu
           forceAgent: options.forceAgent,
           routing: options.routing,
           auto: options.auto,
+          enabledAgents: options.enabledAgents,
           cwd: options.cwdForTask?.(index),
           signal,
           maxRetries: options.maxRetries,

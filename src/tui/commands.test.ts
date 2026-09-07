@@ -5,6 +5,7 @@ import {
   INITIAL_MODE_STATE,
   parseInput,
   SLASH_COMMANDS,
+  toggleAgents,
 } from "./commands.js";
 
 describe("parseInput", () => {
@@ -87,6 +88,25 @@ describe("parseInput", () => {
     expect(parseInput("/routing classify")).toEqual({ kind: "set-routing", routing: "classify" });
   });
 
+  it("/agents sozinho lista, e on/off aceitam um ou mais nomes", () => {
+    expect(parseInput("/agents")).toEqual({ kind: "list-agents" });
+    expect(parseInput("/agents off antigravity")).toEqual({
+      kind: "toggle-agents", agents: ["antigravity"], enabled: false,
+    });
+    expect(parseInput("/agents on antigravity")).toEqual({
+      kind: "toggle-agents", agents: ["antigravity"], enabled: true,
+    });
+    expect(parseInput("/agents off antigravity,codex")).toEqual({
+      kind: "toggle-agents", agents: ["antigravity", "codex"], enabled: false,
+    });
+  });
+
+  it("/agents com verbo ou nome inválido retorna erro, nunca vira tarefa", () => {
+    expect(parseInput("/agents antigravity").kind).toBe("error");
+    expect(parseInput("/agents off banana").kind).toBe("error");
+    expect(parseInput("/agents off").kind).toBe("error");
+  });
+
   it("/routing com argumento inválido ou ausente retorna erro, não trava nem vira tarefa", () => {
     expect(parseInput("/routing banana").kind).toBe("error");
     expect(parseInput("/routing").kind).toBe("error");
@@ -133,17 +153,17 @@ describe("getCommandSuggestions", () => {
 describe("applyModeCommand", () => {
   it("/agent claude força o agente no estado", () => {
     const next = applyModeCommand(INITIAL_MODE_STATE, { kind: "set-agent", agent: "claude" });
-    expect(next).toEqual({ forcedAgent: "claude", autoMode: false, routing: "keyword" });
+    expect(next).toEqual({ ...INITIAL_MODE_STATE, forcedAgent: "claude" });
   });
 
   it("/agent auto reseta forcedAgent pra null, mantendo o resto do estado", () => {
     const forced: import("./commands.js").ModeState = {
+      ...INITIAL_MODE_STATE,
       forcedAgent: "claude",
       autoMode: true,
-      routing: "keyword",
     };
     const next = applyModeCommand(forced, { kind: "set-agent", agent: null });
-    expect(next).toEqual({ forcedAgent: null, autoMode: true, routing: "keyword" });
+    expect(next).toEqual({ ...INITIAL_MODE_STATE, forcedAgent: null, autoMode: true });
   });
 
   it("/auto alterna autoMode: desligado -> ligado -> desligado", () => {
@@ -156,7 +176,7 @@ describe("applyModeCommand", () => {
 
   it("/routing classify muda a estratégia, mantendo o resto do estado intacto", () => {
     const next = applyModeCommand(INITIAL_MODE_STATE, { kind: "set-routing", routing: "classify" });
-    expect(next).toEqual({ forcedAgent: null, autoMode: false, routing: "classify" });
+    expect(next).toEqual({ ...INITIAL_MODE_STATE, routing: "classify" });
   });
 
   it("comandos que não afetam o modo (exit, history, error, task, help, status, clear) deixam o estado inalterado", () => {
@@ -169,10 +189,44 @@ describe("applyModeCommand", () => {
     expect(applyModeCommand(INITIAL_MODE_STATE, { kind: "task", text: "x" })).toEqual(INITIAL_MODE_STATE);
   });
 
+  it("desligar um agente tira ele de enabledAgents sem mexer no resto do modo", () => {
+    const { mode, error } = toggleAgents(INITIAL_MODE_STATE, ["antigravity"], false);
+    expect(error).toBeUndefined();
+    expect(mode.enabledAgents).toEqual(["claude", "codex"]);
+    expect(mode.routing).toBe(INITIAL_MODE_STATE.routing);
+  });
+
+  it("religar devolve o agente na ordem canônica do registro, não na ordem de digitação", () => {
+    const off = toggleAgents(INITIAL_MODE_STATE, ["claude", "antigravity"], false).mode;
+    expect(off.enabledAgents).toEqual(["codex"]);
+    const on = toggleAgents(off, ["antigravity", "claude"], true).mode;
+    expect(on.enabledAgents).toEqual(["claude", "antigravity", "codex"]);
+  });
+
+  it("desligar o último agente é recusado com erro, e o estado fica intacto", () => {
+    const restam = toggleAgents(INITIAL_MODE_STATE, ["antigravity", "codex"], false).mode;
+    const { mode, error } = toggleAgents(restam, ["claude"], false);
+    expect(error).toContain("sem nenhum agente");
+    expect(mode).toBe(restam);
+  });
+
+  it("desligar o agente que estava forçado volta pro roteamento automático", () => {
+    const forced = applyModeCommand(INITIAL_MODE_STATE, { kind: "set-agent", agent: "antigravity" });
+    const { mode } = toggleAgents(forced, ["antigravity"], false);
+    expect(mode.forcedAgent).toBeNull();
+    expect(mode.enabledAgents).toEqual(["claude", "codex"]);
+  });
+
+  it("desligar um agente qualquer NÃO mexe num agente forçado diferente", () => {
+    const forced = applyModeCommand(INITIAL_MODE_STATE, { kind: "set-agent", agent: "claude" });
+    const { mode } = toggleAgents(forced, ["antigravity"], false);
+    expect(mode.forcedAgent).toBe("claude");
+  });
+
   it("forçar agente, ligar --auto e trocar o roteamento são independentes entre si", () => {
     let state = applyModeCommand(INITIAL_MODE_STATE, { kind: "toggle-auto" });
     state = applyModeCommand(state, { kind: "set-agent", agent: "claude" });
     state = applyModeCommand(state, { kind: "set-routing", routing: "classify" });
-    expect(state).toEqual({ forcedAgent: "claude", autoMode: true, routing: "classify" });
+    expect(state).toEqual({ ...INITIAL_MODE_STATE, forcedAgent: "claude", autoMode: true, routing: "classify" });
   });
 });

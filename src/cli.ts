@@ -5,7 +5,8 @@ import { Command } from "commander";
 import ora, { type Ora } from "ora";
 import { writeFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
-import { isAgentName } from "./agents/registry.js";
+import { DEFAULT_ENABLED_AGENTS, parseAgentNames, withAgentsDisabled } from "./agents/availability.js";
+import { AGENT_NAMES, isAgentName } from "./agents/registry.js";
 import { discoverProjectConfig, resolveConfigValue } from "./config.js";
 import { runPipeline, runPipelines, type PipelineResult } from "./orchestrator/pipeline.js";
 import { DEFAULT_CONCURRENCY } from "./orchestrator/scheduler.js";
@@ -35,6 +36,13 @@ if (projectConfig && projectConfig.warnings.length > 0) {
   }
 }
 
+// Agentes fora de jogo neste projeto (cota esgotada, CLI não instalado) —
+// resolvido junto do config porque vale pra todo comando, inclusive a TUI.
+const configuredEnabledAgents = withAgentsDisabled(
+  DEFAULT_ENABLED_AGENTS,
+  projectConfig?.config.disabledAgents ?? [],
+);
+
 // A TUI abre quando não há nenhum subcomando registrado no commander —
 // comportamento de fallback, não um "comando" propriamente dito.
 const argv = process.argv.slice(2);
@@ -56,6 +64,7 @@ if (isTuiInvocation) {
     initialForcedAgent: cfg?.agent,
     initialRouting: cfg?.routing,
     initialAutoMode: cfg?.auto,
+    initialEnabledAgents: configuredEnabledAgents,
     maxRetries: cfg?.maxRetries,
     retryBaseDelayMs: cfg?.retryBaseDelayMs,
   });
@@ -89,14 +98,14 @@ function printError(error: unknown): void {
   console.error(chalk.red(error instanceof Error ? error.message : String(error)));
 }
 
-async function promptForAgent(task: string, spinner: Ora): Promise<AgentName | null> {
+async function promptForAgent(task: string, spinner: Ora, enabled: readonly AgentName[]): Promise<AgentName | null> {
   spinner.stop();
   console.log(chalk.yellow(`\nNão consegui identificar automaticamente qual agente usar pra:`));
   console.log(chalk.dim(`  "${task}"`));
 
   if (!process.stdin.isTTY) {
     console.log(
-      chalk.red("Entrada não é interativa (stdin não é um TTY) — não dá pra perguntar. Use --agent claude|antigravity|codex."),
+      chalk.red(`Entrada não é interativa (stdin não é um TTY) — não dá pra perguntar. Use --agent ${enabled.join("|")}.`),
     );
     return null;
   }
@@ -104,14 +113,13 @@ async function promptForAgent(task: string, spinner: Ora): Promise<AgentName | n
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
     for (;;) {
-      const answer = (await rl.question('Escolha o agente ["claude" | "antigravity" | "codex" | "cancelar"]: '))
-        .trim()
-        .toLowerCase();
+      const options = [...enabled.map((agent) => `"${agent}"`), '"cancelar"'].join(" | ");
+      const answer = (await rl.question(`Escolha o agente [${options}]: `)).trim().toLowerCase();
 
-      if (isAgentName(answer)) return answer;
+      if (isAgentName(answer) && enabled.includes(answer)) return answer;
       if (answer === "cancelar" || answer === "cancel") return null;
 
-      console.log(chalk.red('Opção inválida. Digite "claude", "antigravity", "codex" ou "cancelar".'));
+      console.log(chalk.red(`Opção inválida. Digite ${options}.`));
     }
   } finally {
     rl.close();
@@ -132,6 +140,11 @@ program
   )
   .option("--agent <agente>", "Força o agente (claude|antigravity|codex), pulando o roteamento automático")
   .option(
+    "--without <agentes>",
+    "Tira agentes de jogo nesta execução (ex.: --without antigravity quando a cota acabou); " +
+      "o papel deles é reatribuído ao próximo agente da preferência",
+  )
+  .option(
     "--routing <estrategia>",
     'Estratégia de roteamento: "keyword" (padrão, por palavra-chave) ou "classify" ' +
       "(classifica toda tarefa via claude, sem tentar keyword antes)",
@@ -147,12 +160,32 @@ program
   )
   .action(async (
     tarefas: string[],
-    opts: { agent?: string; routing?: string; auto?: boolean; concurrency?: string },
+    opts: { agent?: string; without?: string; routing?: string; auto?: boolean; concurrency?: string },
   ) => {
     if (opts.agent && !isAgentName(opts.agent)) {
       console.error(chalk.red(`--agent inválido: "${opts.agent}". Use "claude", "antigravity" ou "codex".`));
       process.exitCode = 1;
       return;
+    }
+    // --without se soma ao disabledAgents do projeto em vez de substituí-lo:
+    // os dois dizem "não use este agente", não "use exatamente estes".
+    let enabledAgents = configuredEnabledAgents;
+    if (opts.without) {
+      const parsed = parseAgentNames(opts.without);
+      if ("error" in parsed) {
+        console.error(chalk.red(`--without inválido: ${parsed.error}`));
+        process.exitCode = 1;
+        return;
+      }
+      enabledAgents = withAgentsDisabled(enabledAgents, parsed.agents);
+    }
+    if (enabledAgents.length === 0) {
+      console.error(chalk.red("Nenhum agente sobrou habilitado — revise --without e o \"disabledAgents\" do .orquestradorrc."));
+      process.exitCode = 1;
+      return;
+    }
+    if (enabledAgents.length < AGENT_NAMES.length) {
+      console.log(chalk.dim(`Agentes em jogo: ${enabledAgents.join(", ")} (${AGENT_NAMES.length - enabledAgents.length} fora).`));
     }
     if (opts.routing && !isRoutingStrategy(opts.routing)) {
       console.error(chalk.red(`--routing inválido: "${opts.routing}". Use "keyword" ou "classify".`));
@@ -180,6 +213,7 @@ program
           forceAgent,
           routing,
           auto,
+          enabledAgents,
           maxRetries,
           retryBaseDelayMs,
           onRetry: (agent, info) => {
@@ -188,7 +222,7 @@ program
             spinner.start(`Rodando: ${tarefa}`);
           },
           resolveAmbiguousAgent: async (task) => {
-            const chosen = await promptForAgent(task, spinner);
+            const chosen = await promptForAgent(task, spinner, enabledAgents);
             if (chosen) spinner.start(`Rodando: ${tarefa}`);
             return chosen;
           },
@@ -238,6 +272,7 @@ program
       forceAgent,
       routing,
       auto,
+      enabledAgents,
       concurrency,
       maxRetries,
       retryBaseDelayMs,
@@ -352,12 +387,17 @@ program
     console.log(status.gitBranch
       ? `Git: ${chalk.green(`branch ${status.gitBranch}`)} · ${status.gitClean ? chalk.green("limpo") : chalk.yellow("com alterações")}`
       : chalk.red("Git: não é um repositório"));
-    for (const [name, health] of [["claude", status.claude], ["agy", status.antigravity], ["codex", status.codex]] as const) {
-      console.log(`${health.installed ? chalk.green("✔") : chalk.red("✖")} ${name}${health.version ? `: ${health.version}` : `: ${health.error}`}`);
+    for (const [name, agent, health] of [
+      ["claude", "claude", status.claude],
+      ["agy", "antigravity", status.antigravity],
+      ["codex", "codex", status.codex],
+    ] as const) {
+      const off = configuredEnabledAgents.includes(agent) ? "" : chalk.yellow(" (desligado no .orquestradorrc)");
+      console.log(`${health.installed ? chalk.green("✔") : chalk.red("✖")} ${name}${health.version ? `: ${health.version}` : `: ${health.error}`}${off}`);
     }
     console.log(chalk.dim("O diagnóstico confirma executáveis e Git; autenticação só é confirmada na primeira chamada do agente."));
     if (!status.gitBranch || !status.gitClean) process.exitCode = 1;
   });
 
-registerTeamCommands(program, projectConfig?.config.team);
+registerTeamCommands(program, projectConfig?.config.team, configuredEnabledAgents);
 program.parseAsync(process.argv);

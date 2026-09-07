@@ -1,4 +1,11 @@
-import { isAgentName } from "../agents/registry.js";
+import {
+  DEFAULT_ENABLED_AGENTS,
+  disabledAgents,
+  parseAgentNames,
+  withAgentsDisabled,
+  withAgentsEnabled,
+} from "../agents/availability.js";
+import { AGENT_NAMES, isAgentName } from "../agents/registry.js";
 import type { AgentName, RoutingStrategy } from "../types.js";
 
 export interface SlashCommandDef {
@@ -62,6 +69,12 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
     category: "Agente e Roteamento",
   },
   {
+    name: "agents",
+    synopsis: "/agents [on|off <nomes>]",
+    description: "Lista os agentes e liga/desliga um deles (ex.: acabou a cota do antigravity)",
+    category: "Agente e Roteamento",
+  },
+  {
     name: "routing",
     synopsis: "/routing <keyword|classify>",
     description: "Define a estratégia de roteamento das tarefas",
@@ -110,6 +123,8 @@ export type ParsedInput =
   | { kind: "clear" }
   | { kind: "help" }
   | { kind: "set-agent"; agent: AgentName | null }
+  | { kind: "list-agents" }
+  | { kind: "toggle-agents"; agents: AgentName[]; enabled: boolean }
   | { kind: "toggle-auto" }
   | { kind: "set-routing"; routing: RoutingStrategy }
   | { kind: "error"; message: string };
@@ -217,6 +232,18 @@ export function parseInput(raw: string): ParsedInput {
         kind: "error",
         message: 'Uso: "/agent claude", "/agent antigravity", "/agent codex" ou "/agent auto" (volta ao roteamento normal).',
       };
+    case "agents": {
+      if (!rawArg) return { kind: "list-agents" };
+      const [action, ...names] = rawArg.split(/\s+/);
+      const verb = (action ?? "").toLowerCase();
+      const enabled = verb === "on" || verb === "add";
+      if (!enabled && verb !== "off" && verb !== "rm") {
+        return { kind: "error", message: 'Uso: "/agents" (lista), "/agents off antigravity" ou "/agents on antigravity".' };
+      }
+      const parsed = parseAgentNames(names.join(","));
+      if ("error" in parsed) return { kind: "error", message: parsed.error };
+      return { kind: "toggle-agents", agents: parsed.agents, enabled };
+    }
     case "routing":
       if (isRoutingStrategy(arg)) {
         return { kind: "set-routing", routing: arg };
@@ -244,12 +271,56 @@ export interface ModeState {
   autoMode: boolean;
   /** Equivalente ao --routing do modo CLI — padrão "keyword". */
   routing: RoutingStrategy;
+  /**
+   * Quem está em jogo nesta sessão. Vive aqui, e não em props fixas, porque
+   * "/agents off antigravity" precisa valer da próxima tarefa em diante —
+   * cota acaba no meio da sessão, não no começo dela.
+   */
+  enabledAgents: AgentName[];
+}
+
+/**
+ * Liga/desliga agentes, recusando deixar a sessão sem nenhum — sem agente
+ * habilitado a TUI não roda mais nada, então isso é erro de comando, não um
+ * estado alcançável. Devolve o erro em vez de lançar: quem chama transforma
+ * numa entrada de transcript.
+ */
+export function toggleAgents(
+  state: ModeState,
+  agents: AgentName[],
+  enabled: boolean,
+): { mode: ModeState; error?: string } {
+  const next = enabled
+    ? withAgentsEnabled(state.enabledAgents, agents)
+    : withAgentsDisabled(state.enabledAgents, agents);
+
+  if (next.length === 0) {
+    return {
+      mode: state,
+      error: `Não dá pra desabilitar ${agents.join(", ")}: a sessão ficaria sem nenhum agente.`,
+    };
+  }
+
+  // Desabilitar o agente que estava forçado deixaria a sessão presa num
+  // agente que não pode rodar — cai de volta pro roteamento automático.
+  const forcedAgent = state.forcedAgent && next.includes(state.forcedAgent) ? state.forcedAgent : null;
+  return { mode: { ...state, enabledAgents: next, forcedAgent } };
+}
+
+/** Só pra exibição — a fonte de verdade é `ModeState.enabledAgents`. */
+export function describeAgents(state: ModeState): { agent: AgentName; enabled: boolean }[] {
+  return AGENT_NAMES.map((agent) => ({ agent, enabled: state.enabledAgents.includes(agent) }));
+}
+
+export function disabledIn(state: ModeState): AgentName[] {
+  return disabledAgents(state.enabledAgents);
 }
 
 export const INITIAL_MODE_STATE: ModeState = {
   forcedAgent: null,
   autoMode: false,
   routing: "keyword",
+  enabledAgents: DEFAULT_ENABLED_AGENTS,
 };
 
 // Só "set-agent", "toggle-auto" e "set-routing" alteram o modo; os demais retornam o estado inalterado.
@@ -261,6 +332,10 @@ export function applyModeCommand(state: ModeState, action: ParsedInput): ModeSta
       return { ...state, autoMode: !state.autoMode };
     case "set-routing":
       return { ...state, routing: action.routing };
+    case "toggle-agents":
+      // Um toggle inválido (deixaria a sessão vazia) devolve o estado
+      // intacto aqui; quem precisa MOSTRAR o porquê chama toggleAgents direto.
+      return toggleAgents(state, action.agents, action.enabled).mode;
     default:
       return state;
   }

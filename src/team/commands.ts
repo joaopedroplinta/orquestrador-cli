@@ -3,6 +3,7 @@ import { open, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { Command } from "commander";
 import { isAgentName } from "../agents/registry.js";
+import type { AgentName } from "../types.js";
 import type { TeamConfig } from "../config.js";
 import { cleanupTeam, DEFAULT_TEAM_DIRECTORY, isTeamInterrupted, listTeams, readTeam, recoverTeam, runTeam, sendToTeam } from "./coordinator.js";
 import { parseTeamPlan } from "./plan.js";
@@ -54,7 +55,12 @@ async function followTeamEvents(id: string): Promise<void> {
   }
 }
 
-export function registerTeamCommands(program: Command, config?: TeamConfig): void {
+/**
+ * `enabledAgents` são os agentes em jogo neste projeto (todos menos
+ * "disabledAgents" do .orquestradorrc) — viram o default de --agents, pra que
+ * desligar um agente por cota valha também pro modo team.
+ */
+export function registerTeamCommands(program: Command, config?: TeamConfig, enabledAgents?: AgentName[]): void {
   const team = program.command("team").description("Coordena agentes em paralelo, com worktrees e mensagens");
   team.command("run <tarefa>")
     .description("Planeja subtarefas, executa dependências e prepara uma branch de integração")
@@ -69,8 +75,11 @@ export function registerTeamCommands(program: Command, config?: TeamConfig): voi
       const controller = new AbortController();
       const cancel = () => { console.error("Cancelando equipe; preservando worktrees e resultados..."); controller.abort(); };
       try {
-        const names = (opts.agents ?? config?.agents?.join(",") ?? "claude,codex,antigravity").split(",").map((s) => s.trim());
+        const fallback = (config?.agents ?? enabledAgents ?? ["claude", "codex", "antigravity"]).join(",");
+        const names = (opts.agents ?? fallback).split(",").map((s) => s.trim());
         if (!names.every(isAgentName)) throw new Error("Use --agents claude,codex,antigravity (ou um subconjunto).");
+        const offLimits = enabledAgents ? names.filter((name) => !enabledAgents.includes(name)) : [];
+        if (offLimits.length) throw new Error(`Agente(s) desligado(s) no .orquestradorrc: ${offLimits.join(", ")}.`);
         if (opts.planner && !isAgentName(opts.planner)) throw new Error("Coordenador inválido.");
         const timeoutMs = Number(opts.timeout ?? config?.timeoutMs ?? 300_000);
         if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error("Timeout deve ser um inteiro positivo em ms.");
