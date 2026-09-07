@@ -59,7 +59,11 @@ node dist/cli.js run "antigravity>codex>claude: pesquisar, implementar e revisar
 node dist/cli.js
 ```
 
-Dentro da TUI, use `/help` para a lista de comandos. Exemplos úteis:
+Dentro da TUI, `/exit` (ou `/quit`) sai a qualquer momento; `Ctrl+C` precisa
+ser apertado duas vezes seguidas (igual ao Claude Code) — o primeiro só
+mostra "Pressione Ctrl+C de novo para sair.", que expira sozinho depois de
+2 segundos se o segundo não vier. Use `/help` para a lista de comandos.
+Exemplos úteis:
 
 ```text
 /agent codex

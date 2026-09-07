@@ -729,3 +729,44 @@ describe("App — ligar e desligar agentes", () => {
     expect(lastFrame()).toContain("1 desligado(s)");
   });
 });
+
+describe("App — Ctrl+C precisa de confirmação pra sair", () => {
+  afterEach(cleanup);
+
+  async function ctrlC(stdin: FakeStdin): Promise<void> {
+    stdin.write("\x03");
+    await tick();
+  }
+
+  it("o primeiro Ctrl+C só arma o aviso, sem sair — a tela continua respondendo", async () => {
+    const { lastFrame, stdin } = render(<App />);
+    await ctrlC(stdin);
+
+    expect(lastFrame()).toContain("Pressione Ctrl+C de novo para sair.");
+
+    // Confirma que não saiu: digitar depois ainda aparece na tela.
+    await typeText(stdin, "ainda aqui");
+    expect(lastFrame()).toContain("ainda aqui");
+  });
+
+  it("um segundo Ctrl+C dentro da janela sai — a tela para de responder à digitação", async () => {
+    const { lastFrame, stdin } = render(<App />);
+    await ctrlC(stdin);
+    await ctrlC(stdin);
+
+    const frameAoSair = lastFrame();
+    await typeText(stdin, "nao deveria aparecer");
+
+    // Depois de sair, o app não processa mais entrada — nada novo é digitado.
+    expect(lastFrame()).toBe(frameAoSair);
+  });
+
+  it("digitar entre um Ctrl+C e outro não desarma o aviso nem interrompe a digitação normal", async () => {
+    const { lastFrame, stdin } = render(<App />);
+    await ctrlC(stdin);
+    await typeText(stdin, "oi");
+
+    expect(lastFrame()).toContain("Pressione Ctrl+C de novo para sair.");
+    expect(lastFrame()).toContain("oi");
+  });
+});

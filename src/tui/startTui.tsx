@@ -28,7 +28,10 @@ export async function startTui(options: StartTuiOptions = {}): Promise<void> {
       maxRetries={options.maxRetries}
       retryBaseDelayMs={options.retryBaseDelayMs}
     />,
-    { incrementalRendering: true },
+    // exitOnCtrlC: false porque App.tsx implementa o "aperte duas vezes pra
+    // sair" (igual ao Claude Code) — o auto-exit padrão do Ink sairia direto
+    // na primeira tecla, sem nunca passar pelo useInput que arma o aviso.
+    { incrementalRendering: true, exitOnCtrlC: false },
   );
   await waitUntilExit();
 }

@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { Box, Static, Text, useApp } from "ink";
+import { Box, Static, Text, useApp, useInput } from "ink";
 import Spinner from "ink-spinner";
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { agentsForRoles } from "../agents/availability.js";
 import { AGENT_NAMES, AGENT_REGISTRY, isAgentName } from "../agents/registry.js";
 import { runPipeline, runPipelines } from "../orchestrator/pipeline.js";
@@ -95,6 +95,9 @@ interface LiveTeam {
 
 /** Mantido em sincronia com o --version do cli.ts. */
 const VERSION = "0.1.0";
+
+/** Janela pra confirmar a saída com um segundo Ctrl+C, igual ao Claude Code. */
+const CTRL_C_CONFIRM_WINDOW_MS = 2000;
 
 /** Cauda do output que cabe numa lane, pra não empurrar a tela inteira pra cima. */
 const LANE_TAIL_CHARS = 220;
@@ -480,6 +483,27 @@ export default function App({
   retryBaseDelayMs,
 }: AppProps = {}) {
   const { exit } = useApp();
+  // Ctrl+C precisa ser apertado duas vezes (igual ao Claude Code) — a
+  // primeira só arma um aviso por CTRL_C_CONFIRM_WINDOW_MS; se a segunda não
+  // vier nesse intervalo, o armamento expira sozinho e volta a exigir duas
+  // teclas de novo. `exitOnCtrlC: false` em startTui.tsx desliga o
+  // auto-exit padrão do Ink, que senão sairia na primeira tecla sem passar
+  // por aqui.
+  const [exitArmed, setExitArmed] = useState(false);
+  const exitArmTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useInput((input, key) => {
+    if (!key.ctrl || input !== "c") return;
+    if (exitArmed) {
+      if (exitArmTimeoutRef.current) clearTimeout(exitArmTimeoutRef.current);
+      exit();
+      return;
+    }
+    setExitArmed(true);
+    exitArmTimeoutRef.current = setTimeout(() => setExitArmed(false), CTRL_C_CONFIRM_WINDOW_MS);
+  });
+  useEffect(() => () => {
+    if (exitArmTimeoutRef.current) clearTimeout(exitArmTimeoutRef.current);
+  }, []);
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([
     {
       kind: "banner",
@@ -1011,7 +1035,11 @@ export default function App({
             placeholder={status === "asking-agent" ? "claude | antigravity | codex | cancelar" : "descreva uma tarefa..."}
           />
         </Box>
-        {status === "idle" && <ComposerHint draft={draft} mode={mode} />}
+        {exitArmed ? (
+          <Text color="yellow">Pressione Ctrl+C de novo para sair.</Text>
+        ) : (
+          status === "idle" && <ComposerHint draft={draft} mode={mode} />
+        )}
         <Text dimColor>{"─".repeat(columns)}</Text>
       </Box>
 
