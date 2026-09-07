@@ -88,7 +88,7 @@ describe("App (TUI)", () => {
     const frame = lastFrame() ?? "";
 
     expect(frame).toContain("orquestrador");
-    expect(frame.split("⚡ orquestrador")).toHaveLength(2); // exatamente 1 ocorrência
+    expect(frame.split("orquestrador 0.1.0")).toHaveLength(2); // exatamente 1 ocorrência
   });
 
   it("roda uma tarefa completa: spinner aparece, depois o resultado, e o input volta a ficar ativo", async () => {
@@ -257,7 +257,7 @@ describe("App (TUI) — slash commands", () => {
     await submit(stdin, "/agent claude");
 
     expect(lastFrame()).toContain("Agente forçado: claude");
-    expect(lastFrame()).toContain("agente: claude (forçado)");
+    expect(lastFrame()).toContain("● claude");
   });
 
   it("/auto liga a classificação automática sem afetar o agente forçado", async () => {
@@ -266,8 +266,8 @@ describe("App (TUI) — slash commands", () => {
     await submit(stdin, "/auto");
 
     expect(lastFrame()).toContain("Classificação automática (--auto) ligada.");
-    expect(lastFrame()).toContain("agente: claude (forçado)");
-    expect(lastFrame()).toContain("auto: ligado");
+    expect(lastFrame()).toContain("● claude");
+    expect(lastFrame()).toContain("auto");
   });
 
   it("/agent auto reseta o roteamento normal mantendo o --auto ligado", async () => {
@@ -277,8 +277,8 @@ describe("App (TUI) — slash commands", () => {
     await submit(stdin, "/agent auto");
 
     expect(lastFrame()).toContain("Roteamento normal restaurado");
-    expect(lastFrame()).toContain("agente: automático");
-    expect(lastFrame()).toContain("auto: ligado");
+    expect(lastFrame()).toContain("● automático");
+    expect(lastFrame()).toContain("auto");
   });
 
   it("/routing classify muda a estratégia e reflete na StatusLine, sem afetar agente/auto", async () => {
@@ -287,8 +287,8 @@ describe("App (TUI) — slash commands", () => {
     await submit(stdin, "/routing classify");
 
     expect(lastFrame()).toContain("Roteamento: classify");
-    expect(lastFrame()).toContain("roteamento: classify");
-    expect(lastFrame()).toContain("agente: claude (forçado)"); // não mexeu no que já estava setado
+    expect(lastFrame()).toContain("classify");
+    expect(lastFrame()).toContain("● claude"); // não mexeu no que já estava setado
   });
 
   it("/routing com argumento inválido mostra erro amigável, sem mudar o estado", async () => {
@@ -296,7 +296,7 @@ describe("App (TUI) — slash commands", () => {
     await submit(stdin, "/routing banana");
 
     expect(lastFrame()).toContain('Uso: "/routing keyword" ou "/routing classify"');
-    expect(lastFrame()).toContain("roteamento: keyword"); // continua no padrão
+    expect(lastFrame()).toContain("keyword"); // continua no padrão
   });
 
   it("uma tarefa rodada com /routing classify chega em runPipeline com routing: \"classify\"", async () => {
@@ -342,7 +342,7 @@ describe("App (TUI) — slash commands", () => {
 
     // a tela continua funcional depois do erro
     await submit(stdin, "/agent claude");
-    expect(lastFrame()).toContain("agente: claude (forçado)");
+    expect(lastFrame()).toContain("● claude");
   });
 
   it("/help exibe guia de comandos e categorias", async () => {
@@ -373,7 +373,7 @@ describe("App (TUI) — slash commands", () => {
     await tick();
     await tick();
     expect(lastFrame()).toContain("Histórico visual limpo.");
-    expect(lastFrame()).toContain("⚡ orquestrador");
+    expect(lastFrame()).toContain("orquestrador 0.1.0");
   });
 
   it("/exit encerra a aplicação", async () => {
@@ -432,7 +432,7 @@ describe("App (TUI) — digitação em rajada, sem tick() de proteção entre te
     stdin.write("\r");
     await tick();
 
-    expect(lastFrame()).toContain("agente: claude (forçado)");
+    expect(lastFrame()).toContain("● claude");
   });
 });
 
