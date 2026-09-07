@@ -229,6 +229,24 @@ Convenções abaixo pro discovery/precedência completos.
   visual "pesado" na TUI (bordas largas, muito texto por frame) deve levar
   isso em conta — inclusive o streaming (ver abaixo), que foi
   re-validado especificamente contra esse risco.
+- **`Ctrl+C` exige duas teclas seguidas pra sair (igual ao Claude Code),
+  não é mais o auto-exit padrão do Ink.** `render()` em `startTui.tsx`
+  passa `exitOnCtrlC: false` — sem isso, o próprio Ink chama `exit()` na
+  primeira tecla, antes de qualquer handler nosso rodar. `App.tsx` tem seu
+  próprio `useInput` pra isso: a primeira tecla arma `exitArmed` (mostra
+  "Pressione Ctrl+C de novo para sair." no lugar do `ComposerHint`, ver
+  render do input) e agenda um `setTimeout` de `CTRL_C_CONFIRM_WINDOW_MS`
+  (2000ms) que desarma sozinho; a segunda tecla dentro da janela limpa esse
+  timeout e chama `exit()` de verdade. **`ink-testing-library` sempre
+  renderiza com `exitOnCtrlC: false`** internamente (não lê a opção que
+  passamos pro `render()` de produção), então os testes em `App.test.tsx`
+  já testavam esse caminho sem precisar de setup extra — confirmado
+  escrevendo um probe descartável que provou que `stdin.write("\x03")`
+  chega em `useInput` como `{ ctrl: true, input: "c" }` antes de escrever
+  os testes de verdade. Validado também com PTY real (`pexpect`): um
+  Ctrl+C isolado deixa o processo vivo e a tela respondendo normalmente
+  (`isalive() === True` mesmo depois da janela de 2s expirar sozinha),
+  dois seguidos saem limpo (`exitstatus: 0`).
 - **Streaming de output é real pro `antigravity`, simulado pro `claude`** —
   confirmado com um probe manual (`spawn` + log de timing dos chunks de
   stdout, ver "Estado atual"): `agy -p` escreve aos poucos conforme gera a
@@ -861,8 +879,9 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
 - [x] Tela interativa (`src/tui/App.tsx` + `src/tui/startTui.tsx`, Ink/React):
       `orquestrador` sem argumentos abre um transcript rolável tipo chat —
       digita tarefa, roda via `runPipeline()`, mostra spinner e resultado;
-      `/history` (via `listRuns()`), `/exit`/`/quit`, `Ctrl+C` (padrão do
-      Ink). Prompt de ambiguidade reimplementado em React (não usa
+      `/history` (via `listRuns()`), `/exit`/`/quit`, `Ctrl+C` (duas teclas
+      seguidas pra confirmar, ver Convenções). Prompt de ambiguidade
+      reimplementado em React (não usa
       `readline`, incompatível com o raw mode do Ink).
       Acabamento visual: banner de boas-vindas (dentro do `<Static>`, só
       renderiza uma vez), caixa com borda no input (muda de cor durante a
