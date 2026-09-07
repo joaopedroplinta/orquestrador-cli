@@ -170,7 +170,6 @@ export function parsePlannerOutput(output: string, agents: AgentName[]): TeamPla
 export function plannerPrompt(task: string, agents: AgentName[]): string {
   return [
     "Planeje uma equipe de agentes para a tarefa abaixo. Apenas planeje; não altere arquivos.",
-    "Leia .agents/team.md e o perfil correspondente ao seu agente em .agents/ se esses arquivos existirem no projeto antes de planejar.",
     `Agentes disponíveis: ${agents.join(", ")}. Use apenas os necessários.`,
     "Divida em subtarefas concretas com responsabilidades e critérios de conclusão claros.",
     "Subtarefas independentes executarão simultaneamente em worktrees Git isoladas.",

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parsePlannerOutput, parseTeamPlan, pathsOverlap, plannerPrompt } from "./plan.js";
+import { parsePlannerOutput, parseTeamPlan, pathsOverlap } from "./plan.js";
 const a = { id: "api", agent: "codex", task: "implementar API", dependsOn: [] };
 const b = { id: "tests", agent: "claude", task: "testar", dependsOn: ["api"] };
 describe("plano de equipe", () => {
@@ -25,10 +25,6 @@ describe("plano de equipe", () => {
   it("aceita JSON em bloco e recusa prosa inesperada", () => {
     expect(parsePlannerOutput('```json\n' + JSON.stringify({ tasks: [a] }) + '\n```', ["codex"]).tasks).toHaveLength(1);
     expect(() => parsePlannerOutput("Não consegui planejar", ["codex"])).toThrow("JSON válido");
-  });
-
-  it("instrui o planejador a carregar os perfis versionados quando existirem", () => {
-    expect(plannerPrompt("implementar login", ["claude", "codex"])).toContain(".agents/team.md");
   });
 });
 
