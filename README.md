@@ -17,7 +17,6 @@ oferece um modo de equipe com worktrees Git isoladas para mudanças paralelas.
 - Caixa de mensagens, quadro de contratos e regras de posse de arquivos entre subtarefas.
 - Estado persistido, recuperação de execuções interrompidas e limpeza segura de worktrees.
 - Histórico local, relatórios em markdown e retry automático com backoff.
-- Perfis versionados em [`.agents`](.agents/README.md) para orientar cada ferramenta.
 
 ## Requisitos
 
@@ -223,14 +222,6 @@ argumentos, executada sem shell dentro de cada worktree antes da subtarefa —
 configurar por aqui. Flags da CLI têm prioridade sobre as preferências
 equivalentes do arquivo; `disabledAgents` e `--without` se somam (ver
 "Ligar e desligar agentes" acima).
-
-## Perfis de agentes
-
-Use [`.agents`](.agents/README.md) para manter instruções específicas do
-projeto em revisão de código. No modo `team`, o orquestrador pede que cada
-agente leia `team.md` e seu perfil (`claude.md`, `codex.md` ou
-`antigravity.md`) antes de trabalhar. Esses arquivos definem responsabilidades
-e convenções; não guardam segredos nem concedem permissões.
 
 ## Arquitetura
 
