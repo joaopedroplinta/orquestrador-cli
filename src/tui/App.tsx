@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { basename } from "node:path";
+import { homedir } from "node:os";
 import { Box, Static, Text, useApp } from "ink";
 import Spinner from "ink-spinner";
 import { Fragment, useCallback, useEffect, useState } from "react";
@@ -41,7 +41,7 @@ interface BatchTag {
 }
 
 type TranscriptEntry =
-  | { kind: "banner"; id: string }
+  | { kind: "banner"; id: string; projectPath: string }
   | { kind: "task"; id: string; text: string; agents: AgentName[]; batch?: BatchTag }
   | { kind: "team-task"; id: string; text: string }
   | { kind: "team-result"; id: string; state: TeamState }
@@ -88,12 +88,21 @@ interface LiveTeam {
   lanes: Map<string, { agent: AgentName; output: string }>;
 }
 
+/** Mantido em sincronia com o --version do cli.ts. */
+const VERSION = "0.1.0";
+
 /** Cauda do output que cabe numa lane, pra não empurrar a tela inteira pra cima. */
 const LANE_TAIL_CHARS = 220;
 
 function laneTail(output: string): string {
   const flat = output.replace(/\s+/g, " ").trim();
   return flat.length > LANE_TAIL_CHARS ? `…${flat.slice(-LANE_TAIL_CHARS)}` : flat;
+}
+
+/** `~/projeto` em vez do caminho absoluto — é como claude e agy mostram. */
+function shortenHome(path: string): string {
+  const home = homedir();
+  return path.startsWith(home) ? `~${path.slice(home.length)}` : path;
 }
 
 function batchPrefix(batch: BatchTag | undefined): string {
@@ -123,34 +132,27 @@ function describeError(error: unknown): { kind: "error" | "cancelled"; message: 
 
 // ─── Componentes de UI ────────────────────────────────────────────────────────
 
-function Banner() {
-  // Largura explícita porque `width="100%"` não resolve dentro de <Static>,
-  // que renderiza fora do fluxo de layout — sem isso a caixa do banner sai
-  // mais estreita que a do input logo abaixo. Como <Static> nunca re-renderiza,
-  // congelar a largura na montagem é consistente com a própria semântica dele.
-  const width = process.stdout.columns ?? 80;
+/**
+ * Identidade + metadados, sem caixa — mesma forma que `claude` e `agy` usam
+ * (o codex encaixota, mas é o único dos três). Um bloco de marca à esquerda e
+ * as informações da sessão à direita, cada uma numa linha.
+ */
+function Banner({ projectPath }: { projectPath: string }) {
+  const mark = ["  ▄▀▀▄  ", " ▀▄  ▄▀ ", "  ▀▄▄▀  "];
+  const info = [
+    <Text key="n" bold color="cyan">orquestrador {VERSION}</Text>,
+    <Text key="a" dimColor>{AGENT_NAMES.length} agentes · {AGENT_NAMES.join(" · ")}</Text>,
+    <Text key="p" dimColor>{projectPath}</Text>,
+  ];
   return (
-    // Sem marginBottom: a StatusLine logo abaixo já tem marginTop, e os dois
-    // juntos abriam duas linhas em branco.
-    <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1} width={width}>
-      <Box justifyContent="space-between">
-        <Text bold color="cyan">⚡ orquestrador</Text>
-        <Text color="green">● {AGENT_NAMES.length} agentes prontos</Text>
-      </Box>
-      <Text dimColor>Planeje, execute e revise tarefas no mesmo projeto.</Text>
-      {/* O banner é o único lugar que ENSINA — renderiza uma vez, dentro do
-          <Static>. A StatusLine abaixo só mostra estado, pra não repetir isto
-          em toda tela. */}
-      <Box marginTop={1} flexDirection="column">
-        <Text dimColor>
-          <Text color="green">tarefa</Text> executar · <Text color="green">;</Text> paralelo ·{" "}
-          <Text color="green">agente:</Text> forçar · <Text color="green">/team</Text> equipe
-        </Text>
-        <Text dimColor>
-          <Text color="cyan">Tab</Text> completa · <Text color="cyan">↑/↓</Text> histórico ·{" "}
-          <Text color="cyan">/help</Text> todos os comandos · <Text color="cyan">Ctrl+C</Text> sair
-        </Text>
-      </Box>
+    <Box flexDirection="column">
+      {mark.map((line, i) => (
+        <Box key={i}>
+          <Text color="cyan">{line}</Text>
+          <Text>{"  "}</Text>
+          {info[i]}
+        </Box>
+      ))}
     </Box>
   );
 }
@@ -379,50 +381,30 @@ function SummaryCardView({ runs }: { runs: HistoryRun[] }) {
   );
 }
 
-function StatusLine({
-  mode,
-  projectName,
-  gitBranch,
-}: {
-  mode: ModeState;
-  projectName: string;
-  gitBranch: string | null;
-}) {
+function StatusLine({ mode, gitBranch }: { mode: ModeState; gitBranch: string | null }) {
   return (
-    <Box flexDirection="column" marginTop={1}>
-      <Box>
-        <Text dimColor>📁 </Text>
-        <Text bold color="cyan">
-          {projectName}
-        </Text>
-        {gitBranch && (
-          <Text dimColor>
-            {" "}(<Text color="green">⎇ {gitBranch}</Text>)
+    <Box flexDirection="column">
+      {/* Uma linha só, abaixo do input: estado à esquerda, um ÚNICO ponteiro
+          de ajuda à direita — `? for shortcuts` do codex/agy, `/effort` do
+          claude. Listar seis atalhos aqui era ruído permanente; quem quer a
+          lista completa abre /help. */}
+      <Box justifyContent="space-between">
+        {/* Cada segmento é UM <Text> com o texto contíguo: quebrar em vários
+            faz o Ink intercalar códigos ANSI no meio da frase, o que atrapalha
+            leitura por teste e não ganha nada visualmente. */}
+        <Box>
+          {mode.forcedAgent ? (
+            <Text color={agentColor(mode.forcedAgent)}>{`● ${mode.forcedAgent}`}</Text>
+          ) : (
+            <Text dimColor>● automático</Text>
+          )}
+          <Text dimColor={mode.routing !== "classify"} color={mode.routing === "classify" ? "yellow" : undefined}>
+            {` · ${mode.routing}`}
           </Text>
-        )}
-      </Box>
-      {/* Só ESTADO — nada de atalhos aqui. Ensinar é papel do banner (uma vez)
-          e do /help; repetir a cada tela é ruído permanente. Só o que está
-          diferente do padrão ganha destaque; o resto fica apagado. */}
-      <Box>
-        <Text dimColor>{"agente "}</Text>
-        {mode.forcedAgent ? (
-          <Text color={agentColor(mode.forcedAgent)} bold>
-            {mode.forcedAgent}
-          </Text>
-        ) : (
-          <Text dimColor>automático</Text>
-        )}
-        <Text dimColor>{"  ·  roteamento "}</Text>
-        <Text dimColor={mode.routing !== "classify"} color={mode.routing === "classify" ? "yellow" : undefined}>
-          {mode.routing}
-        </Text>
-        {mode.autoMode && (
-          <>
-            <Text dimColor>{"  ·  "}</Text>
-            <Text color="green">auto</Text>
-          </>
-        )}
+          {mode.autoMode && <Text color="green"> · auto</Text>}
+          {gitBranch && <Text dimColor>{` · ⎇ ${gitBranch}`}</Text>}
+        </Box>
+        <Text dimColor>/help para comandos</Text>
       </Box>
     </Box>
   );
@@ -454,12 +436,12 @@ export default function App({
   retryBaseDelayMs,
 }: AppProps = {}) {
   const { exit } = useApp();
-  const [transcript, setTranscript] = useState<TranscriptEntry[]>([{ kind: "banner", id: randomUUID() }]);
+  const [transcript, setTranscript] = useState<TranscriptEntry[]>([{ kind: "banner", id: randomUUID(), projectPath: shortenHome(process.cwd()) }]);
   const [status, setStatus] = useState<Status>("idle");
   const [runningTask, setRunningTask] = useState<string | null>(null);
   const [pendingAgentPrompt, setPendingAgentPrompt] = useState<PendingAgentPrompt | undefined>();
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [projectName] = useState(() => basename(process.cwd()));
+  const [columns] = useState(() => process.stdout.columns ?? 80);
   const [gitBranch, setGitBranch] = useState<string | null>(null);
   const [mode, setMode] = useState<ModeState>({
     forcedAgent: initialForcedAgent ?? INITIAL_MODE_STATE.forcedAgent,
@@ -848,8 +830,6 @@ export default function App({
     <Box flexDirection="column">
       <Static items={transcript}>{(entry) => <TranscriptEntryView key={entry.id} entry={entry} />}</Static>
 
-      <StatusLine mode={mode} projectName={projectName} gitBranch={gitBranch} />
-
       {status === "running" && liveTasks && (
         <Box flexDirection="column" marginTop={1}>
           <Text dimColor>
@@ -931,20 +911,30 @@ export default function App({
         </Box>
       )}
 
-      <Box marginTop={1} borderStyle="round" borderColor={status === "running" ? "gray" : "cyan"} paddingX={1}>
-        <Box flexDirection="column">
-          <Box>
-            <Text color="green">{status === "asking-agent" ? "> " : "❯ "}</Text>
-            <PromptInput
-              onSubmit={handleSubmit}
-              onChange={setDraft}
-              disabled={status === "running"}
-              placeholder={status === "asking-agent" ? "claude | antigravity | codex | cancelar" : "descreva uma tarefa..."}
-            />
-          </Box>
-          {status === "idle" && <ComposerHint draft={draft} mode={mode} />}
+      {/* Input delimitado por réguas, não por caixa — é a convenção que
+          claude e agy seguem, e o codex nem delimita. Também gera menos bytes
+          por frame que uma borda (que desenha laterais em toda linha), o que
+          ajuda no risco de EIO do bug #3. */}
+      <Box marginTop={1} flexDirection="column">
+        <Text dimColor>{"─".repeat(columns)}</Text>
+        <Box>
+          <Text color={status === "running" ? "gray" : "green"}>
+            {status === "asking-agent" ? "> " : "❯ "}
+          </Text>
+          <PromptInput
+            onSubmit={handleSubmit}
+            onChange={setDraft}
+            disabled={status === "running"}
+            placeholder={status === "asking-agent" ? "claude | antigravity | codex | cancelar" : "descreva uma tarefa..."}
+          />
         </Box>
+        {status === "idle" && <ComposerHint draft={draft} mode={mode} />}
+        <Text dimColor>{"─".repeat(columns)}</Text>
       </Box>
+
+      {/* Estado ABAIXO do input, como claude e agy fazem: o que você digita é
+          o foco, o modo é referência periférica. */}
+      <StatusLine mode={mode} gitBranch={gitBranch} />
     </Box>
   );
 }
@@ -954,7 +944,7 @@ export default function App({
 function TranscriptEntryView({ entry }: { entry: TranscriptEntry }) {
   switch (entry.kind) {
     case "banner":
-      return <Banner />;
+      return <Banner projectPath={entry.projectPath} />;
     case "help":
       return <HelpView />;
     case "status-card":
