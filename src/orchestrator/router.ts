@@ -1,10 +1,14 @@
+import { agentsForRoles, DEFAULT_ENABLED_AGENTS, type AgentRole } from "../agents/availability.js";
 import { runClaudeCode } from "../agents/claudeCode.js";
 import { AGENT_NAMES, isAgentName } from "../agents/registry.js";
 import type { AgentName } from "../types.js";
 
-const ANTIGRAVITY_KEYWORDS = ["pesquisar", "buscar", "o que é", "o que e", "última versão de", "ultima versao de"];
+// As listas apontam pro PAPEL, não pro agente: qual agente cumpre cada papel
+// depende de quem está habilitado (ver agents/availability.ts). Com todos
+// habilitados, pesquisa → antigravity e implementação → claude, como sempre.
+const RESEARCH_KEYWORDS = ["pesquisar", "buscar", "o que é", "o que e", "última versão de", "ultima versao de"];
 
-const CLAUDE_KEYWORDS = ["implementar", "criar arquivo", "refatorar", "corrigir bug", "corrigir"];
+const IMPLEMENTATION_KEYWORDS = ["implementar", "criar arquivo", "refatorar", "corrigir bug", "corrigir"];
 
 const CLASSIFY_TIMEOUT_MS = 30_000;
 
@@ -57,37 +61,35 @@ export function parseTaskAgentPrefix(rawTask: string): ParsedTaskAgentPrefix {
 
 type Classification = "pesquisa" | "implementacao" | "ambos";
 
-function matchesAntigravity(lowered: string): boolean {
-  return ANTIGRAVITY_KEYWORDS.some((keyword) => lowered.includes(keyword));
+const CLASSIFICATION_ROLES: Record<Classification, AgentRole[]> = {
+  pesquisa: ["pesquisa"],
+  implementacao: ["implementacao"],
+  ambos: ["pesquisa", "implementacao"],
+};
+
+function matchesResearch(lowered: string): boolean {
+  return RESEARCH_KEYWORDS.some((keyword) => lowered.includes(keyword));
 }
 
-function matchesClaude(lowered: string): boolean {
-  return CLAUDE_KEYWORDS.some((keyword) => lowered.includes(keyword));
+function matchesImplementation(lowered: string): boolean {
+  return IMPLEMENTATION_KEYWORDS.some((keyword) => lowered.includes(keyword));
 }
 
-function buildPlan(classification: Classification, task: string): TaskStep[] {
-  switch (classification) {
-    case "pesquisa":
-      return [{ agent: "antigravity", prompt: task }];
-    case "implementacao":
-      return [{ agent: "claude", prompt: task }];
-    case "ambos":
-      return [
-        { agent: "antigravity", prompt: task },
-        { agent: "claude", prompt: task },
-      ];
-  }
+function buildPlan(classification: Classification, task: string, enabled: readonly AgentName[]): TaskStep[] {
+  return agentsForRoles(CLASSIFICATION_ROLES[classification], enabled).map((agent) => ({ agent, prompt: task }));
 }
 
 // Handoff entre etapas é feito pelo pipeline via `context`; cada etapa aqui recebe o texto integral da tarefa.
-export function planTask(task: string): TaskStep[] {
+// `enabled` limita quem pode receber uma etapa — um agente desabilitado (cota
+// esgotada, CLI não instalado) cede o papel pro próximo da preferência.
+export function planTask(task: string, enabled: readonly AgentName[] = DEFAULT_ENABLED_AGENTS): TaskStep[] {
   const lowered = task.toLowerCase();
-  const needsAntigravity = matchesAntigravity(lowered);
-  const needsClaude = matchesClaude(lowered);
+  const needsResearch = matchesResearch(lowered);
+  const needsImplementation = matchesImplementation(lowered);
 
-  if (needsAntigravity && needsClaude) return buildPlan("ambos", task);
-  if (needsAntigravity) return buildPlan("pesquisa", task);
-  if (needsClaude) return buildPlan("implementacao", task);
+  if (needsResearch && needsImplementation) return buildPlan("ambos", task, enabled);
+  if (needsResearch) return buildPlan("pesquisa", task, enabled);
+  if (needsImplementation) return buildPlan("implementacao", task, enabled);
 
   return [];
 }
@@ -105,7 +107,15 @@ function parseClassification(output: string): Classification | null {
 
 // Chamada leve e isolada ao claude só pra classificar — não é uma etapa do pipeline, não entra no histórico.
 // `null` (falha ou resposta inesperada) sinaliza pra quem chamou cair no fallback interativo ou erro.
-export async function classifyTaskWithClaude(task: string): Promise<TaskStep[] | null> {
+// Também devolve `null` quando o próprio claude está desabilitado: a
+// classificação depende dele especificamente, então não há como classificar
+// sem ele — melhor cair no fallback do que chamar um agente que o usuário tirou.
+export async function classifyTaskWithClaude(
+  task: string,
+  enabled: readonly AgentName[] = DEFAULT_ENABLED_AGENTS,
+): Promise<TaskStep[] | null> {
+  if (!enabled.includes("claude")) return null;
+
   const prompt = [
     'Classifique a tarefa abaixo em exatamente uma palavra: "pesquisa" (só precisa',
     'de pesquisa/informação), "implementacao" (só precisa de código/arquivo), ou',
@@ -123,5 +133,7 @@ export async function classifyTaskWithClaude(task: string): Promise<TaskStep[] |
   }
 
   const classification = parseClassification(output);
-  return classification ? buildPlan(classification, task) : null;
+  if (!classification) return null;
+  const plan = buildPlan(classification, task, enabled);
+  return plan.length > 0 ? plan : null;
 }

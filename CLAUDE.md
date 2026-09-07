@@ -369,6 +369,34 @@ Convenções abaixo pro discovery/precedência completos.
   tentativa, então repeti-la de novo como "fallback" seria uma segunda
   chamada idêntica e inútil; a UI (CLI e TUI) não impede passar os dois
   juntos, só documenta que `--auto` fica sem efeito extra nesse caso.
+- **Papel e agente são coisas separadas desde que dá pra desligar um agente
+  (`agents/availability.ts`).** O roteamento por palavra-chave decide um
+  `AgentRole` ("pesquisa"/"implementacao"); QUEM cumpre o papel sai de
+  `agentsForRoles(roles, enabled)`, que pega o primeiro habilitado de
+  `ROLE_PREFERENCE`. Antes, papel e agente eram a mesma coisa (a lista de
+  keywords se chamava `ANTIGRAVITY_KEYWORDS` e devolvia literalmente
+  `{ agent: "antigravity" }`), então tirar um agente de jogo quebrava o
+  roteamento em vez de reatribuir. Com todos habilitados o resultado é
+  idêntico ao de antes — a preferência só entra em jogo quando o preferido
+  está fora. Dois papéis com dois agentes habilitados continuam sendo um
+  handoff entre agentes DIFERENTES (`agentsForRoles` evita repetir); com um
+  agente só, colapsam numa etapa, porque handoff de um agente pra ele mesmo
+  não é handoff. **`availability.ts` é puro e não importa nada de
+  `pipeline.ts`/`registry` além dos nomes** — quem decide a lista habilitada
+  é sempre quem chama (`cli.ts` a partir do `.orquestradorrc`/`--without`,
+  `App.tsx` a partir do `ModeState`).
+- **Agente desabilitado escolhido a dedo é ERRO, nunca substituição
+  silenciosa.** `--agent`, o prefixo `agente:` e a sequência `a>b:` que
+  apontam pra alguém fora de jogo lançam antes de `startRun()`/qualquer
+  chamada de agente (`runPipeline`, em pipeline.ts) — o usuário pediu
+  AQUELE agente, então trocar por outro seria fazer outra coisa. Só o
+  roteamento automático (keyword/classify) reatribui. `classifyTaskWithClaude`
+  devolve `null` direto quando o próprio claude está desabilitado, sem
+  chamar nada: a classificação depende dele especificamente, então `--auto`/
+  `--routing=classify` sem claude cai no fallback de ambiguidade de sempre.
+  **Nunca é possível ficar sem nenhum agente habilitado** — config,
+  `--without` e `/agents off` recusam a última remoção, cada um com sua
+  mensagem; `runPipeline` ainda checa de novo por garantia.
 - **`agents/registry.ts` é a única fonte de verdade de "quais agentes
   existem de verdade" pro resto do sistema — `pipeline.ts`, `router.ts`,
   `cli.ts` e a TUI leem de lá em vez de hardcodar `"claude"`/`"antigravity"`
@@ -575,10 +603,11 @@ faltando):
 **Passos que continuam manuais** (são julgamento de produto/UX, não
 boilerplate — não dá pra derivar isso de lugar nenhum):
 
-5. **`src/orchestrator/router.ts`** — se o agente novo deve participar do
-   roteamento por palavra-chave (`planTask`), adicione uma lista de
-   keywords (`NOVOAGENTE_KEYWORDS`) e estenda `buildPlan`/`planTask` pra
-   considerá-la. Isso é uma decisão editorial genuína (que palavras
+5. **`src/agents/availability.ts` e `src/orchestrator/router.ts`** — decida
+   onde o agente novo entra em `ROLE_PREFERENCE` (a ordem de quem cumpre
+   cada papel quando o preferido está desabilitado). Se ele merece um papel
+   NOVO, aí sim adicione uma lista de keywords em `router.ts` e um
+   `AgentRole` novo. Isso é uma decisão editorial genuína (que palavras
    disparam esse agente?), não uma lacuna de arquitetura — é totalmente
    válido um agente novo ficar de fora do roteamento por keyword e só ser
    alcançável via `--agent`/prefixo por tarefa/`--routing=classify`
@@ -963,6 +992,16 @@ por tarefa (via `AGENT_NAMES`), e o dispatch de execução dentro de
       fallback neutro (`"white"`) em vez de um ternário de 2 ramos, pra
       degradar sem crash (mas não sem aviso visual) se um agente novo
       esquecer de ganhar cor própria.
+- [x] Ligar/desligar agente em runtime e por projeto. `/agents`,
+      `/agents on|off <nomes>` na TUI (`ModeState.enabledAgents`,
+      `toggleAgents` em `tui/commands.ts`), `--without <agentes>` no `run`,
+      e `disabledAgents` no `.orquestradorrc` — os três se somam, nenhum
+      substitui o outro. Lógica pura em `agents/availability.ts`
+      (`agentsForRoles`/`withAgentsDisabled`/`parseAgentNames`), testada em
+      `availability.test.ts`. Motivador real: cota do antigravity acabar no
+      meio de uma sessão. A linha de status mostra `2/3 agentes`, `/agents`
+      mostra quem cumpre cada papel agora, e `doctor` marca quem está
+      desligado pelo config.
 - [x] `orquestrador export <runId>` — relatório em markdown de uma
       execução do histórico (`src/reporting.ts`, `buildMarkdownReport`),
       escrito no stdout por padrão ou num arquivo com `-o`/`--output`.

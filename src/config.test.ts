@@ -172,3 +172,36 @@ describe("discoverProjectConfig", () => {
 it("aceita Codex como agente padrão do projeto", () => {
   expect(parseOrquestradorConfig('{"agent":"codex"}')).toEqual({ config: { agent: "codex" }, warnings: [] });
 });
+
+describe('parseOrquestradorConfig — "disabledAgents"', () => {
+  it("aceita uma lista válida de agentes", () => {
+    const { config, warnings } = parseOrquestradorConfig(JSON.stringify({ disabledAgents: ["antigravity"] }));
+    expect(config.disabledAgents).toEqual(["antigravity"]);
+    expect(warnings).toEqual([]);
+  });
+
+  it("aceita lista vazia (nada desabilitado)", () => {
+    const { config, warnings } = parseOrquestradorConfig(JSON.stringify({ disabledAgents: [] }));
+    expect(config.disabledAgents).toEqual([]);
+    expect(warnings).toEqual([]);
+  });
+
+  it("recusa desabilitar TODOS os agentes — sobraria nada pra rodar", () => {
+    const { config, warnings } = parseOrquestradorConfig(
+      JSON.stringify({ disabledAgents: ["claude", "antigravity", "codex"] }),
+    );
+    expect(config.disabledAgents).toBeUndefined();
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("recusa nome desconhecido, repetição e valor que não é lista, sem invalidar o resto do arquivo", () => {
+    for (const value of [["gpt-5"], ["claude", "claude"], "antigravity", 3]) {
+      const { config, warnings } = parseOrquestradorConfig(
+        JSON.stringify({ disabledAgents: value, routing: "classify" }),
+      );
+      expect(config.disabledAgents).toBeUndefined();
+      expect(config.routing).toBe("classify");
+      expect(warnings).toHaveLength(1);
+    }
+  });
+});

@@ -287,6 +287,8 @@ Dentro da tela:
   modo CLI: troca a estratégia de roteamento inteira pras próximas tarefas.
   `classify` classifica toda tarefa via `claude`, mesmo uma com
   palavra-chave óbvia, pulando a tabela de palavra-chave inteiramente.
+- `/agents`, `/agents on|off <nomes>` — lista os agentes e liga/desliga um
+  deles pelo resto da sessão (ver "Ligar e desligar agentes" abaixo).
 - Enquanto você digita, a área de composição mostra a rota sugerida, avisa
   quando `;` vai disparar tarefas em paralelo e mostra prefixos de agente
   inválidos antes de enviar. Para comandos, **Tab ou Enter** completa uma
@@ -341,6 +343,71 @@ exemplo), continua rodando como uma tarefa única normal.
 (no `;` ou digitada sozinha) com `claude:`/`antigravity:` — ver "Agente
 por tarefa dentro de um lote" na seção do `run` mais abaixo pra sintaxe,
 prioridade e exemplos completos.
+
+### Ligar e desligar agentes (`/agents`, `--without`, `disabledAgents`)
+
+Quando a cota de um agente acaba (ou o CLI dele não está instalado numa
+máquina), dá pra tirar ele de jogo sem desinstalar nada nem trocar o
+roteamento de toda tarefa na mão.
+
+Na tela interativa:
+
+```
+/agents                      # lista os agentes e quem cumpre cada papel
+/agents off antigravity      # tira ele de jogo até o fim da sessão
+/agents on antigravity        # devolve
+/agents off antigravity,codex # aceita mais de um de uma vez
+```
+
+Sem a tela interativa:
+
+```bash
+orquestrador run --without antigravity "pesquisar a última versão do Node.js"
+```
+
+E, pra valer sempre num projeto, `disabledAgents` no `.orquestradorrc`
+(ver "Configuração por projeto" abaixo). `--without` **se soma** ao
+`disabledAgents` do projeto em vez de substituí-lo — os dois dizem "não use
+este agente", não "use exatamente estes".
+
+**O papel do agente desligado é reatribuído, a tarefa não deixa de rodar.**
+O roteamento por palavra-chave decide um *papel* (pesquisa ou
+implementação), e o agente que cumpre aquele papel é o primeiro habilitado
+nesta ordem:
+
+| Papel          | Ordem de preferência              |
+| -------------- | --------------------------------- |
+| pesquisa       | antigravity → claude → codex      |
+| implementação  | claude → codex → antigravity      |
+
+Então, sem o antigravity, `"pesquisar X"` passa a rodar no `claude`; sem o
+claude, `"implementar X"` passa a rodar no `codex`. Uma tarefa de pesquisa
+**e** implementação continua sendo duas etapas com handoff entre dois
+agentes diferentes enquanto houver dois habilitados (`claude` → `codex`);
+com um só habilitado, as duas etapas colapsam numa.
+
+**Escolher explicitamente um agente desligado é erro, não substituição
+silenciosa** — `--agent antigravity`, o prefixo `antigravity:` e a
+sequência `claude>antigravity:` falham com uma mensagem clara antes de
+abrir qualquer execução. O motivo é que você pediu *aquele* agente; trocar
+por outro seria fazer outra coisa. Na tela interativa, `/agents off` no
+agente que estava forçado por `/agent` avisa e volta ao roteamento
+automático, em vez de deixar a sessão presa num agente que não roda.
+
+Duas consequências que vale saber:
+
+- **`--auto` e `--routing=classify` dependem do `claude`** — a chamada de
+  classificação é feita por ele especificamente. Com o `claude` desligado,
+  a classificação nem é tentada (não faz sentido chamar um agente que você
+  tirou de jogo); a tarefa cai no fallback de sempre (prompt de escolha, ou
+  erro fora de terminal interativo).
+- **Nunca dá pra desligar todos** — `.orquestradorrc`, `--without` e
+  `/agents off` recusam a última remoção, porque sem agente nenhum não
+  sobra nada pra rodar.
+
+O estado fica visível o tempo todo: a linha de status mostra `2/3 agentes`
+quando alguém está fora, e o `doctor` marca `(desligado no
+.orquestradorrc)` ao lado do CLI correspondente.
 
 ### Retry automático em erros transitórios
 
@@ -612,6 +679,7 @@ máquina.
 ```json
 {
   "agent": "claude",
+  "disabledAgents": ["antigravity"],
   "routing": "keyword",
   "auto": false,
   "maxRetries": 5,
@@ -631,6 +699,7 @@ Todos os campos são opcionais — configure só o que quiser mudar do padrão:
 | Campo              | Equivale a         | Efeito                                                                 |
 | ------------------ | ------------------ | ----------------------------------------------------------------------- |
 | `agent`             | `--agent`           | Força esse agente pra toda tarefa rodada neste projeto.                 |
+| `disabledAgents`    | `--without`         | Tira agentes de jogo neste projeto (cota esgotada, CLI ausente).        |
 | `routing`           | `--routing`         | Estratégia de roteamento (`"keyword"` ou `"classify"`).                 |
 | `auto`              | `--auto`            | Liga a classificação via IA quando a palavra-chave não decide nada.     |
 | `maxRetries`        | *(sem flag ainda)*  | Máximo de tentativas de retry por etapa em erro transitório.            |

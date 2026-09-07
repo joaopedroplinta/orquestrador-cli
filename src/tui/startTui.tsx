@@ -9,6 +9,8 @@ export interface StartTuiOptions {
   initialRouting?: RoutingStrategy;
   /** Seed de ModeState.autoMode — vem do campo "auto" do .orquestradorrc, se houver. */
   initialAutoMode?: boolean;
+  /** Seed de ModeState.enabledAgents — todos menos "disabledAgents" do .orquestradorrc. */
+  initialEnabledAgents?: AgentName[];
   /** Repassado direto pra todo runPipeline/runPipelines da sessão — vem do .orquestradorrc, sem slash command pra mudar em runtime. */
   maxRetries?: number;
   retryBaseDelayMs?: number;
@@ -22,6 +24,7 @@ export async function startTui(options: StartTuiOptions = {}): Promise<void> {
       initialForcedAgent={options.initialForcedAgent}
       initialRouting={options.initialRouting}
       initialAutoMode={options.initialAutoMode}
+      initialEnabledAgents={options.initialEnabledAgents}
       maxRetries={options.maxRetries}
       retryBaseDelayMs={options.retryBaseDelayMs}
     />,

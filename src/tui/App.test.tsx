@@ -645,3 +645,87 @@ describe("Equipe na TUI", () => {
     expect(lastFrame()).toContain("(entrega tudo no fim)");
   });
 });
+
+describe("App — ligar e desligar agentes", () => {
+  afterEach(cleanup);
+
+  it("/agents lista os três com o estado de cada um e quem cumpre cada papel", async () => {
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "/agents");
+
+    const frame = lastFrame()!;
+    expect(frame).toContain("Agentes");
+    expect(frame).toContain("● claude");
+    expect(frame).toContain("● antigravity");
+    expect(frame).toContain("pesquisa → antigravity");
+    expect(frame).toContain("implementação → claude");
+  });
+
+  it("/agents off antigravity tira ele de jogo e a StatusLine passa a mostrar 2/3", async () => {
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "/agents off antigravity");
+
+    expect(lastFrame()).toContain("Em jogo: claude, codex");
+    expect(lastFrame()).toContain("2/3 agentes");
+  });
+
+  it("depois de desligar o antigravity, o papel de pesquisa passa pro claude na prévia de rota", async () => {
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "/agents off antigravity");
+    await submit(stdin, "/agents");
+
+    expect(lastFrame()).toContain("pesquisa → claude");
+  });
+
+  it("uma tarefa rodada depois do /agents off chega em runPipeline sem o agente desligado", async () => {
+    let capturedOptions!: RunPipelineOptions;
+    mockedRunPipeline.mockImplementation(
+      (options) => new Promise((resolve) => {
+        capturedOptions = options;
+        resolve({ runId: "run-1", task: options.task, steps: [] });
+      }),
+    );
+
+    const { stdin } = render(<App />);
+    await submit(stdin, "/agents off antigravity");
+    await submit(stdin, "pesquisar node");
+    await tick();
+
+    expect(capturedOptions.enabledAgents).toEqual(["claude", "codex"]);
+  });
+
+  it("/agent num agente desligado mostra erro em vez de forçar um agente que não pode rodar", async () => {
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "/agents off antigravity");
+    await submit(stdin, "/agent antigravity");
+
+    expect(lastFrame()).toContain('"antigravity" está desligado');
+    expect(lastFrame()).toContain("● automático");
+  });
+
+  it("desligar o agente que estava forçado avisa e volta pro roteamento automático", async () => {
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "/agent claude");
+    await submit(stdin, "/agents off claude");
+
+    expect(lastFrame()).toContain("saiu de jogo");
+    expect(lastFrame()).toContain("● automático");
+  });
+
+  it("desligar o último agente é recusado, e a sessão continua com quem sobrou", async () => {
+    const { lastFrame, stdin } = render(<App />);
+    await submit(stdin, "/agents off antigravity,codex");
+    await submit(stdin, "/agents off claude");
+
+    expect(lastFrame()).toContain("sem nenhum agente");
+    expect(lastFrame()).toContain("1/3 agentes");
+  });
+
+  it("initialEnabledAgents (vindo do .orquestradorrc) já abre a sessão sem o agente desligado", async () => {
+    const { lastFrame } = render(<App initialEnabledAgents={["claude", "codex"]} />);
+    await tick();
+
+    expect(lastFrame()).toContain("2/3 agentes");
+    expect(lastFrame()).toContain("1 desligado(s)");
+  });
+});

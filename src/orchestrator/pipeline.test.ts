@@ -735,3 +735,51 @@ describe("colaboração com Codex", () => {
     expect(mockedStartRun).not.toHaveBeenCalled();
   });
 });
+
+describe("runPipeline — agentes desabilitados", () => {
+  it("reatribui o papel do agente desabilitado em vez de falhar", async () => {
+    mockedRunClaudeCode.mockResolvedValue(fakeResult("claude", "pesquisa feita pelo claude"));
+
+    const result = await runPipeline({ task: "pesquisar node", enabledAgents: ["claude", "codex"] });
+
+    expect(mockedRunAntigravity).not.toHaveBeenCalled();
+    expect(result.steps.map((step) => step.agent)).toEqual(["claude"]);
+  });
+
+  it("forçar um agente desabilitado é erro explícito, sem abrir run nem chamar ninguém", async () => {
+    await expect(
+      runPipeline({ task: "qualquer coisa", forceAgent: "antigravity", enabledAgents: ["claude", "codex"] }),
+    ).rejects.toThrow(/antigravity.*desabilitado/i);
+
+    expect(mockedRunAntigravity).not.toHaveBeenCalled();
+    expect(mockedStartRun).not.toHaveBeenCalled();
+  });
+
+  it("prefixo por tarefa apontando pra um agente desabilitado também vira erro", async () => {
+    await expect(
+      runPipeline({ task: "antigravity: pesquisar node", enabledAgents: ["claude", "codex"] }),
+    ).rejects.toThrow(/antigravity.*desabilitado/i);
+    expect(mockedStartRun).not.toHaveBeenCalled();
+  });
+
+  it("uma sequência explícita que passa por um agente desabilitado vira erro antes de rodar a primeira etapa", async () => {
+    await expect(
+      runPipeline({ task: "claude>antigravity: fazer X", enabledAgents: ["claude", "codex"] }),
+    ).rejects.toThrow(/antigravity.*desabilitado/i);
+    expect(mockedRunClaudeCode).not.toHaveBeenCalled();
+  });
+
+  it("no lote, cada tarefa respeita a mesma lista de habilitados", async () => {
+    mockedRunClaudeCode.mockResolvedValue(fakeResult("claude", "ok"));
+    mockedRunCodex.mockResolvedValue(fakeResult("codex", "ok"));
+
+    const results = await runPipelines({
+      tasks: ["pesquisar node", "antigravity: implementar X"],
+      enabledAgents: ["claude", "codex"],
+    });
+
+    expect(results[0]!.result!.steps.map((step) => step.agent)).toEqual(["claude"]);
+    expect(String(results[1]!.error)).toMatch(/antigravity.*desabilitado/i);
+    expect(mockedRunAntigravity).not.toHaveBeenCalled();
+  });
+});
