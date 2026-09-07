@@ -16,6 +16,7 @@ oferece um modo de equipe com worktrees Git isoladas para mudanças paralelas.
 - Equipes paralelas com plano DAG, dependências, worktrees e branch de integração.
 - Caixa de mensagens, quadro de contratos e regras de posse de arquivos entre subtarefas.
 - Estado persistido, recuperação de execuções interrompidas e limpeza segura de worktrees.
+- Histórico local, relatórios em markdown e retry automático com backoff.
 - Perfis versionados em [`.agents`](.agents/README.md) para orientar cada ferramenta.
 
 ## Requisitos
@@ -68,6 +69,44 @@ Dentro da TUI, use `/help` para a lista de comandos. Exemplos úteis:
 
 `run` com várias tarefas executa no mesmo diretório. Para mudanças paralelas
 em código, prefira `team run`, que isola os arquivos em worktrees.
+
+`run` com várias tarefas roda todas em paralelo, sem prompt interativo (uma
+tarefa ambígua vira erro pontual dela, sem travar as outras); dentro da TUI,
+o mesmo efeito é separar as tarefas por `;` na mesma linha. Um prefixo por
+tarefa (`claude: implementar X; antigravity: pesquisar Y`) força um agente
+específico só para aquela tarefa do lote.
+
+### Ligar e desligar agentes
+
+Quando a cota de um agente acaba (ou o CLI dele não está instalado numa
+máquina), dá para tirar ele de jogo sem trocar o roteamento na mão. O papel
+dele (pesquisa ou implementação) é reatribuído ao próximo agente habilitado —
+a tarefa não deixa de rodar, só muda quem executa.
+
+```bash
+orquestrador run --without antigravity "pesquisar a última versão do Node.js"
+```
+
+```text
+/agents                    # lista os agentes e quem cumpre cada papel agora
+/agents off antigravity    # tira ele de jogo pelo resto da sessão
+/agents on antigravity     # devolve
+```
+
+`--without`, `/agents off` e `disabledAgents` (no `.orquestradorrc`, abaixo)
+se somam — nenhum substitui o outro — e nenhum deles deixa a sessão sem
+nenhum agente habilitado. Escolher explicitamente um agente desligado
+(`--agent`, o prefixo `agente:`, a sequência `a>b:`) é erro, nunca
+substituição silenciosa: o pedido era por aquele agente específico.
+
+### Retry automático
+
+Uma etapa que falha por um erro potencialmente transitório (timeout, sessão
+expirada, exit code sem cara de erro de sintaxe) é retentada automaticamente
+com backoff exponencial (1s, 2s, 4s...), até 3 vezes por padrão. Comando não
+encontrado e argumento inválido falham direto — repetir não muda o
+resultado. `orquestrador history --last` mostra quantas tentativas cada
+etapa precisou.
 
 ## Equipes paralelas
 
@@ -135,26 +174,51 @@ Se um merge de dependência ou integração entrar em conflito, a worktree é
 preservada para resolução manual. Use `git merge --abort` nela se decidir
 descartar aquele merge pendente.
 
+## Histórico e relatórios
+
+```bash
+orquestrador history                 # lista execuções passadas, mais recente primeiro
+orquestrador history --last          # detalha a última: prompt, output, duração, tokens/custo
+orquestrador export c97f3333         # relatório em markdown de uma execução (id completo ou prefixo de 8)
+orquestrador export c97f3333 -o relatorio.md
+```
+
+Quando há um `.orquestradorrc` por perto, `history` mostra só as execuções
+daquele projeto (`--all` ignora o filtro); `export` nunca é filtrado, já que
+o id já identifica uma execução específica. **Custo é sempre parcial**:
+Claude reporta tokens e custo real em USD; Codex reporta tokens sem custo;
+Antigravity não reporta nada (troca-se isso por manter o streaming real dele
+ao vivo). Um resumo que soma custo avisa quando nem toda etapa reportou.
+
 ## Configuração por projeto
 
 Crie `.orquestradorrc` na raiz do projeto para definir preferências locais:
 
 ```json
 {
+  "agent": "claude",
   "routing": "keyword",
+  "auto": false,
   "disabledAgents": ["antigravity"],
+  "maxRetries": 5,
+  "retryBaseDelayMs": 2000,
   "team": {
     "agents": ["claude", "codex"],
     "concurrency": 2,
-    "bootstrap": ["npm", "ci"]
+    "timeoutMs": 300000,
+    "bootstrap": ["npm", "ci"],
+    "bootstrapTimeoutMs": 600000
   }
 }
 ```
 
-`bootstrap` é uma lista de programa e argumentos, executada sem shell dentro
-de cada worktree antes da subtarefa. Ele é útil para preparar dependências, mas
-pode aumentar o tempo e o uso de rede. Flags da CLI têm prioridade sobre as
-preferências equivalentes do arquivo.
+Todos os campos são opcionais. `bootstrap` é uma lista de programa e
+argumentos, executada sem shell dentro de cada worktree antes da subtarefa —
+útil para preparar dependências, mas pode aumentar tempo e uso de rede.
+`maxRetries`/`retryBaseDelayMs` não têm flag de CLI própria — só dá para
+configurar por aqui. Flags da CLI têm prioridade sobre as preferências
+equivalentes do arquivo; `disabledAgents` e `--without` se somam (ver
+"Ligar e desligar agentes" acima).
 
 ## Perfis de agentes
 
