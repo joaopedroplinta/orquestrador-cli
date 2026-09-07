@@ -1,1124 +1,199 @@
-# orquestrador-cli
+# Orquestrador CLI
 
 [![CI](https://github.com/joaopedroplinta/orquestrador-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/joaopedroplinta/orquestrador-cli/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](package.json)
 [![License: MIT](https://img.shields.io/github/license/joaopedroplinta/orquestrador-cli)](LICENSE)
 
-CLI em Node.js/TypeScript que orquestra três ferramentas de IA agentic —
-**Claude Code** (`claude`), **Antigravity CLI** (`agy`) e **Codex CLI** (`codex`) — numa mesma tarefa.
-Em vez de você decidir na mão qual ferramenta usar pra pesquisar algo e qual
-usar pra implementar, o orquestrador decide isso, dispara os comandos via
-shell, repassa o resultado de uma etapa como contexto de entrada da próxima,
-e guarda tudo num histórico consultável.
+Uma CLI para coordenar **Claude Code**, **Codex** e **Antigravity** no mesmo
+projeto. Ela escolhe ou recebe os agentes, preserva o contexto entre etapas e
+oferece um modo de equipe com worktrees Git isoladas para mudanças paralelas.
 
-## Equipes paralelas com worktrees e mensagens
+## O que oferece
 
-O modo `team` coordena uma tarefa comum, com subtarefas independentes em paralelo
-e dependências sequenciais. Exige um repositório Git **limpo, com pelo menos um
-commit**: todos partem do mesmo commit. Salve suas alterações em commit antes de
-iniciar. Somente os agentes escolhidos precisam estar instalados e autenticados.
+- Roteamento automático, escolha explícita e encadeamento entre agentes.
+- Execução concorrente com limite configurável.
+- TUI interativa com streaming, histórico, diagnóstico e controle de agentes.
+- Equipes paralelas com plano DAG, dependências, worktrees e branch de integração.
+- Caixa de mensagens, quadro de contratos e regras de posse de arquivos entre subtarefas.
+- Estado persistido, recuperação de execuções interrompidas e limpeza segura de worktrees.
+- Perfis versionados em [`.agents`](.agents/README.md) para orientar cada ferramenta.
 
-```bash
-npm run build
+## Requisitos
 
-# Claude planeja; Claude e Codex executam subtarefas em paralelo.
-node dist/cli.js team run "implementar login no backend e frontend, com testes" \
- --agents claude,codex --planner claude --concurrency 2
+- Node.js 20 ou superior
+- Git, para tarefas que alteram código e para o modo `team`
+- Um ou mais CLIs já autenticados: `claude`, `codex` e `agy`
 
-# Você define o plano e evita a chamada de planejamento.
-node dist/cli.js team run "implementar login" \
- --plan examples/team-plan.json --agents claude,codex --concurrency 2
-```
-
-O arquivo de exemplo contém duas tarefas paralelas (`backend` e `frontend`) e
-uma revisão que depende de ambas. Ajuste as descrições ao projeto antes de usar.
-O plano segue este formato:
-
-```json
-{
- "tasks": [
-   {"id":"backend","agent":"codex","task":"Implementar API","dependsOn":[]},
-   {"id":"frontend","agent":"claude","task":"Implementar interface","dependsOn":[]},
-   {"id":"review","agent":"codex","task":"Revisar e testar a integração","dependsOn":["backend","frontend"]}
- ]
-}
-```
-
-O coordenador valida nomes, ids únicos e dependências, rejeitando ciclos antes
-da execução. São até 12 subtarefas e `--concurrency` limita quantas ficam ativas.
-Cada tarefa recebe uma branch e worktree próprias; `process.cwd()` global não é
-alterado. Quando as dependências terminam, seus commits são integrados na
-worktree da tarefa dependente e seus resumos entram no contexto do agente.
-
-**Posse de arquivos (`owns`):** cada subtarefa pode declarar quais caminhos vai
-alterar. Duas subtarefas **sem dependência entre si** que declarem caminhos
-cruzados fazem o plano ser **rejeitado antes de criar worktree ou chamar
-modelo** — sem isso, a colisão só apareceria no merge, depois de já ter pago
-duas execuções. A checagem é conservadora por fronteira de diretório
-(`src/api/**` e `src/api/x.ts` colidem; `src/api/**` e `src/apiary/**` não;
-`src/*.ts` e `src/*.js` são tratados como colisão mesmo sem interseção real —
-o falso positivo só obriga o plano a ser mais específico). `owns` é opcional:
-um plano sem ele roda como antes, sem checagem.
-
-**Critério de aceite (`acceptance`):** condição verificável de "pronto" que
-entra no prompt do agente, que é instruído a checá-la antes de concluir.
-
-```json
-{"id":"backend","agent":"codex","task":"Implementar API","dependsOn":[],
- "owns":["src/api/**"],"acceptance":"npm test passa e GET /health responde 200"}
-```
-
-**Orçamento (`--max-cost`, `--max-duration`):** tetos para execução sem
-supervisão. Ao atingir o limite, o lote é interrompido e worktrees/resultados
-parciais são preservados como em qualquer cancelamento; a checagem acontece a
-cada conclusão de subtarefa, porque interromper no meio de uma chamada de
-modelo não devolveria o gasto. **A cobertura de custo é parcial por natureza**:
-só o claude reporta custo em dólar (codex reporta tokens sem custo, antigravity
-não reporta nada, e nunca inventamos um preço). Quando nem toda etapa reportou,
-a mensagem de parada diz sobre quantas etapas o número foi medido e avisa que o
-gasto real é maior — em vez de apresentar um valor parcial como se fosse o total.
-
-```bash
-node dist/cli.js team run "implementar login" --max-cost 5 --max-duration 900000
-```
-
-**Quadro de contratos:** o canal de mensagens é best-effort — entrega não é
-leitura — então um contrato de API que só vive numa mensagem pode nunca ser
-lido, e dois agentes definem a mesma interface de formas divergentes sem saber.
-Cada worktree recebe também um `contracts.cjs`, apontando para um quadro único
-da equipe:
-
-```bash
-node .orquestrador-team/contracts.cjs list
-node .orquestrador-team/contracts.cjs set auth.token "JWT com claim sub"
-node .orquestrador-team/contracts.cjs get auth.token
-```
-
-Chave nova é livre e o dono reescreve a sua; quem tenta **redefinir a chave de
-outra subtarefa é recusado**, com o valor atual na mensagem, e precisa se
-adequar ou combinar a mudança antes. Como N processos escrevem no mesmo
-arquivo, a exclusão mútua é um lockfile de verdade. A identidade do escritor é
-embutida na geração do helper, por worktree — um agente não se passa por outro
-mexendo no ambiente.
-
-**Acompanhar de outro terminal:** `team status <id> --follow` segue os eventos
-ao vivo até a equipe chegar a um estado terminal.
-
-**Mensagens durante a execução:** cada worktree recebe um utilitário local,
-que não exige instalar dependências:
-
-```bash
-node .orquestrador-team/mailbox.cjs send frontend "POST /login retorna token e user"
-node .orquestrador-team/mailbox.cjs inbox
-```
-
-As instruções pedem aos agentes que consultem a caixa ao iniciar, entre etapas,
-antes de mudar interfaces e antes de concluir. O coordenador entrega mensagens
-a cada 200 ms e guarda remetente, destinatário e texto no registro da equipe.
-`all` transmite para a equipe; `user` registra uma mensagem para você. Mensagens
-para tarefas ainda pendentes ficam na caixa até elas começarem. Em outro terminal:
-
-```bash
-node dist/cli.js team status <id-da-equipe> --messages
-node dist/cli.js team send <id-da-equipe> backend "O login deve aceitar email"
-```
-
-`team status` agora abre um painel compacto com as subtarefas, dependências,
-agentes, integração e erros. Use `--messages` para as últimas mensagens ou
-`--json` quando outro programa precisar ler o estado completo.
-
-**Entrega não significa leitura:** esse protocolo depende de o agente executar
-`inbox`. Ele não interrompe uma chamada do modelo, não reabre tarefas concluídas
-e não transfere arquivos por mensagem. Para depender de código, use `dependsOn`.
-Se um CLI pedir permissão para executar o utilitário, aplicam-se as permissões
-normais dele; o orquestrador não habilita bypass de permissões.
-
-**Integração:** o coordenador faz commits locais das alterações nas worktrees
-das tarefas e os une em uma branch `orquestrador/<id>/integration`. A branch e
-os arquivos do checkout original permanecem intactos. Ao finalizar, a CLI mostra
-o diretório da integração e comandos para revisar o diff e fazer merge depois
-de testar. Um conflito interrompe a integração e preserva os arquivos conflitantes
-nessa worktree. Quando a integração de uma dependência em uma subtarefa falha por
-conflito, a worktree dessa subtarefa também fica com o merge pendente: resolva-o
-manualmente ou execute `git merge --abort` nela antes de reutilizá-la. Uma tarefa que falha bloqueia suas dependentes; as independentes
-terminam e a integração é marcada como parcial. O modo não faz retry automático
-de tarefas que podem ter alterado arquivos.
-
-`--timeout 300000` é o limite padrão por chamada de agente (5 minutos). Ctrl+C
-cancela as chamadas ativas e impede novas tarefas; resultados e worktrees ficam
-preservados. Estado, respostas, uso reportado e mensagens ficam em
-`~/.orquestrador/teams/<id>/state.json`, consultáveis com `team status`, separados
-do histórico SQLite de `run`. `team list` mostra o histórico e marca como
-interrompida uma equipe cujo processo não existe mais. Nesse caso, execute
-`team recover <id>` para fechar o registro sem perder worktrees; ele não tenta
-reexecutar agentes automaticamente, pois uma worktree pode conter alterações
-parciais que precisam ser inspecionadas primeiro.
-
-Worktrees não recebem `node_modules`, arquivos ignorados ou credenciais do
-projeto original. Quando todas usam a mesma preparação, configure `team.bootstrap`
-no `.orquestradorrc`; o comando e seus argumentos são executados diretamente,
-sem shell, antes de cada subtarefa. A revisão/teste da integração é uma tarefa
-explícita do plano; sucesso dos processos não comprova por si só que o código
-está correto.
-
-Não há limpeza automática. Depois de revisar/guardar os resultados, use
-`team cleanup <id>`: ele remove apenas worktrees sem alterações pendentes e
-mantém qualquer uma que precise de atenção. `--force` descarta alterações
-pendentes; `--delete-branches` também remove as branches da equipe, portanto só
-use essas flags depois de guardar o que for necessário.
-O comando `team` é usado no terminal; os comandos e lotes da TUI continuam com
-o comportamento anterior. Na TUI, abra `orquestrador` e digite:
-
-```text
-/team implementar login completo com backend, frontend e testes
-```
-
-A tela acompanha o planejamento, as subtarefas e a integração. Escolha agentes
-e concorrência no próprio campo: `/team --agents claude,codex --concurrency 2
-implementar login`. Para fornecer um plano JSON, use `team run` no terminal.
-
-## Codex e colaboração entre agentes
-
-Depois de compilar (`npm run build`), você pode usar diretamente:
-
-```bash
-node dist/cli.js run "implementar testes para o login" --agent codex
-node dist/cli.js run "codex: revisar os arquivos alterados"
-node dist/cli.js run "antigravity>codex>claude: Antigravity pesquisa opções de autenticação; Codex implementa a melhor opção; Claude revisa código e testes"
-```
-
-Na TUI (`npm run dev`), use `/agent codex` para fixar o agente e `/agent auto`
-para voltar ao roteamento. O prefixo `antigravity>codex>claude:` também funciona
-na TUI. **Na TUI, separe as instruções com vírgulas**, pois `;` separa tarefas
-independentes. Exemplo:
-
-```text
-antigravity>codex>claude: Antigravity pesquisa autenticação, Codex implementa, Claude revisa
-```
-
-A sequência roda da esquerda para a direita no mesmo diretório. Cada etapa
-recebe a resposta da anterior, a tarefa original e sua posição na colaboração.
-O histórico guarda cada resposta e o vínculo entre etapas. É possível voltar
-a um agente (`claude>codex>claude:`). Uma falha interrompe a sequência.
-`--agent`, `/agent` ou `agent` no `.orquestradorrc` têm prioridade sobre o
-prefixo; remova o agente fixo para executar a sequência inteira.
-
-O Codex é chamado com `codex exec --json --sandbox workspace-write -`, com o
-prompt via stdin. O adaptador valida o JSONL, extrai a última mensagem do
-agente e registra tokens de entrada, saída e cache quando disponíveis. Não
-estima custo. A resposta aparece após o turno terminar, com a mesma revelação
-visual simulada usada para Claude; eventos internos não entram no handoff.
-A integração segue a [documentação oficial do modo não interativo do Codex](https://learn.chatgpt.com/docs/non-interactive-mode).
-
-`/status` verifica se o executável está disponível; não confirma autenticação.
-Você pode usar `{"agent":"codex"}` no `.orquestradorrc` como padrão por projeto.
-O roteamento automático continua escolhendo Antigravity para pesquisa e Claude
-para implementação. Codex participa por seleção explícita ou sequência.
-Esta colaboração é uma sequência finita de chamadas, sem sessões persistentes
-ou troca de mensagens enquanto dois agentes executam ao mesmo tempo.
+O orquestrador reutiliza a autenticação de cada CLI; ele não guarda ou gerencia
+credenciais.
 
 ## Instalação
-
-Requisitos:
-
-- Node.js >= 20
-- Os CLIs dos agentes que você vai usar instalados e **já autenticados**:
-  `claude`, `agy` e/ou `codex`. O orquestrador reutiliza o login de cada
-  ferramenta e não gerencia credenciais. Para Codex, rode dentro de um
-  repositório Git.
-
-### Via npm (recomendado)
-
-```bash
-npm install -g orquestrador-cli
-orquestrador --version
-```
-
-> **Nota:** o pacote ainda não foi publicado no npm — o `package.json` já
-> está pronto pra isso (`files`, metadados, `prepublishOnly` rodando testes +
-> build antes de qualquer `npm publish`), mas a publicação em si é manual e
-> ainda não aconteceu. Até lá, use a instalação a partir do código-fonte
-> abaixo.
-
-### A partir do código-fonte (desenvolvimento)
 
 ```bash
 git clone https://github.com/joaopedroplinta/orquestrador-cli.git
 cd orquestrador-cli
 npm install
 npm run build
-npm link        # opcional: expõe o binário `orquestrador` globalmente
+
+# Valida Node, Git e os CLIs disponíveis.
+node dist/cli.js doctor
 ```
 
-Sem `npm link`, rode via `node dist/cli.js <comando>` ou `npm run dev -- <comando>`.
+O pacote ainda não foi publicado no npm. Depois da publicação, a instalação
+global será `npm install -g orquestrador-cli`.
 
-## Uso
-
-### Modo interativo (`orquestrador`, sem argumentos)
-
-Rodar `orquestrador` sozinho, sem subcomando, abre uma tela interativa
-(construída com [Ink](https://github.com/vadimdemedes/ink), a mesma lib por
-trás da interface do Claude Code): digite uma tarefa, aperte Enter, veja o
-output do agente aparecendo aos poucos no transcript enquanto ele roda, e
-digite a próxima tarefa sem sair do processo — tipo uma conversa.
+## Uso rápido
 
 ```bash
-orquestrador
+# Deixa a CLI escolher o agente pela tarefa.
+node dist/cli.js run "pesquisar alternativas de autenticação"
+
+# Escolhe um agente.
+node dist/cli.js run "implementar testes de login" --agent codex
+
+# Faz handoff sequencial entre especialistas.
+node dist/cli.js run "antigravity>codex>claude: pesquisar, implementar e revisar login"
+
+# Abre a interface interativa.
+node dist/cli.js
 ```
 
-Dentro da tela:
+Dentro da TUI, use `/help` para a lista de comandos. Exemplos úteis:
 
-- Cada tarefa digitada roda pela mesma resolução de plano do `run` de uma
-  tarefa só (`planTask` por palavra-chave; se ambígua, aparece um prompt
-  pra escolher `claude`, `antigravity` ou `cancelar`, embutido na própria
-  tela) — a menos que `/agent` esteja forçando um agente (ver abaixo).
-- `/history` — lista as execuções passadas (inclusive as da sessão atual,
-  já que tudo é persistido normalmente em SQLite).
-- `/exit` ou `/quit` — sai. `Ctrl+C` também sai a qualquer momento.
-- `/agent claude` ou `/agent antigravity` — força esse agente pras
-  **próximas tarefas digitadas** (equivalente ao `--agent` do modo CLI),
-  até você trocar de novo ou rodar `/agent auto` pra voltar ao roteamento
-  normal (por palavra-chave / `--auto`).
-- `/auto` — liga/desliga a classificação automática via `claude` quando o
-  roteamento por palavra-chave vem vazio (equivalente ao `--auto` do modo
-  CLI). Independente de `/agent`: dá pra ter os dois ligados, ou só um. Sem
-  efeito com `/routing classify` (ver abaixo).
-- `/routing keyword` ou `/routing classify` — equivalente ao `--routing` do
-  modo CLI: troca a estratégia de roteamento inteira pras próximas tarefas.
-  `classify` classifica toda tarefa via `claude`, mesmo uma com
-  palavra-chave óbvia, pulando a tabela de palavra-chave inteiramente.
-- `/agents`, `/agents on|off <nomes>` — lista os agentes e liga/desliga um
-  deles pelo resto da sessão (ver "Ligar e desligar agentes" abaixo).
-- Enquanto você digita, a área de composição mostra a rota sugerida, avisa
-  quando `;` vai disparar tarefas em paralelo e mostra prefixos de agente
-  inválidos antes de enviar. Para comandos, **Tab ou Enter** completa uma
-  abreviação (`/he` → `/help`); Enter em um comando completo o executa.
-- Um comando começando com `/` que não é nenhum desses (`/foo`) mostra uma
-  mensagem de erro amigável — não trava a tela nem vira uma tarefa.
-- O modo atual (`agente: automático` ou `agente: claude (forçado)`,
-  `roteamento: keyword`/`classify` e `auto: ligado`/`desligado`) fica
-  sempre visível logo abaixo do transcript.
-- Cada tarefa mostra logo abaixo qual agente foi roteado (`→ antigravity`
-  ou `→ antigravity → claude`), e o spinner conta os segundos decorridos
-  enquanto roda. Antigravity e Claude Code aparecem em cores diferentes e
-  consistentes no transcript, pra escanear rápido quem fez o quê.
-- **O output do agente aparece progressivamente enquanto ele roda**, não só
-  no final. Isso é streaming *real* pro Antigravity (o `agy -p` escreve
-  stdout aos poucos, conforme gera a resposta) — o Claude Code não faz
-  isso em modo não-interativo (`claude -p` entrega tudo de uma vez, só
-  quando termina), então pra ele a tela simula a revelação progressiva do
-  texto já pronto, marcada com um `(simulando…)` ao lado do nome do
-  agente pra não confundir com o streaming de verdade. Cada etapa de uma
-  tarefa em duas partes (pesquisa → implementação) vira uma entrada do
-  transcript assim que aquela etapa específica termina, sem esperar a
-  outra.
-
-**Múltiplas tarefas em paralelo, na mesma linha:** separe as tarefas por
-`;` e aperte Enter uma vez só:
-
-```
-pesquisar a última versão do Node.js; implementar um endpoint de login
+```text
+/agent codex
+/agents off antigravity
+/team --agents claude,codex --concurrency 2 implementar login completo
 ```
 
-Cada tarefa do lote roda pelo mesmo `runPipelines()` usado pelo
-`orquestrador run "<t1>" "<t2>"` não-interativo — de verdade em paralelo,
-não uma esperando a outra. Na tela, cada tarefa ganha seu próprio bloco
-rotulado `Tarefa i/N`, com o agente roteado e o streaming daquela tarefa
-específica (real ou simulado, com `(simulando…)` quando for o caso)
-aparecendo ali dentro, nunca misturado com o de outra tarefa do lote.
-Assim que uma tarefa do lote termina, o resultado dela vira uma entrada
-do transcript — não espera as outras.
+`run` com várias tarefas executa no mesmo diretório. Para mudanças paralelas
+em código, prefira `team run`, que isola os arquivos em worktrees.
 
-**Tarefa ambígua dentro de um lote vira erro, não abre o prompt de
-escolha** — a mesma regra que já vale pro `run` não-interativo com várias
-tarefas: um prompt interativo não pode ficar esperando resposta pra uma
-tarefa enquanto trava as outras do mesmo lote. A mensagem de erro indica
-`/agent claude` ou `/agent antigravity` (ou reenviar essa tarefa sozinha,
-fora do lote) como saída.
+## Equipes paralelas
 
-Uma linha sem `;`, ou com só uma parte não-vazia (`;` solto no final, por
-exemplo), continua rodando como uma tarefa única normal.
-
-**Agente diferente por tarefa dentro do lote:** prefixe qualquer tarefa
-(no `;` ou digitada sozinha) com `claude:`/`antigravity:` — ver "Agente
-por tarefa dentro de um lote" na seção do `run` mais abaixo pra sintaxe,
-prioridade e exemplos completos.
-
-### Ligar e desligar agentes (`/agents`, `--without`, `disabledAgents`)
-
-Quando a cota de um agente acaba (ou o CLI dele não está instalado numa
-máquina), dá pra tirar ele de jogo sem desinstalar nada nem trocar o
-roteamento de toda tarefa na mão.
-
-Na tela interativa:
-
-```
-/agents                      # lista os agentes e quem cumpre cada papel
-/agents off antigravity      # tira ele de jogo até o fim da sessão
-/agents on antigravity        # devolve
-/agents off antigravity,codex # aceita mais de um de uma vez
-```
-
-Sem a tela interativa:
+O modo `team` recebe um objetivo, gera ou lê um plano e executa as subtarefas
+em paralelo quando suas dependências permitem. Cada tarefa recebe uma worktree
+e branch próprias. Ao final, os commits concluídos são reunidos em uma branch
+de integração, sem tocar no checkout original.
 
 ```bash
-orquestrador run --without antigravity "pesquisar a última versão do Node.js"
+# O planejador cria um DAG e os agentes executam até duas tarefas por vez.
+node dist/cli.js team run "implementar login com backend, frontend e testes" \
+  --agents claude,codex --planner claude --concurrency 2
+
+# Para controle total, forneça o plano.
+node dist/cli.js team run "implementar login" \
+  --plan examples/team-plan.json --agents claude,codex --concurrency 2
 ```
 
-E, pra valer sempre num projeto, `disabledAgents` no `.orquestradorrc`
-(ver "Configuração por projeto" abaixo). `--without` **se soma** ao
-`disabledAgents` do projeto em vez de substituí-lo — os dois dizem "não use
-este agente", não "use exatamente estes".
-
-**O papel do agente desligado é reatribuído, a tarefa não deixa de rodar.**
-O roteamento por palavra-chave decide um *papel* (pesquisa ou
-implementação), e o agente que cumpre aquele papel é o primeiro habilitado
-nesta ordem:
-
-| Papel          | Ordem de preferência              |
-| -------------- | --------------------------------- |
-| pesquisa       | antigravity → claude → codex      |
-| implementação  | claude → codex → antigravity      |
-
-Então, sem o antigravity, `"pesquisar X"` passa a rodar no `claude`; sem o
-claude, `"implementar X"` passa a rodar no `codex`. Uma tarefa de pesquisa
-**e** implementação continua sendo duas etapas com handoff entre dois
-agentes diferentes enquanto houver dois habilitados (`claude` → `codex`);
-com um só habilitado, as duas etapas colapsam numa.
-
-**Escolher explicitamente um agente desligado é erro, não substituição
-silenciosa** — `--agent antigravity`, o prefixo `antigravity:` e a
-sequência `claude>antigravity:` falham com uma mensagem clara antes de
-abrir qualquer execução. O motivo é que você pediu *aquele* agente; trocar
-por outro seria fazer outra coisa. Na tela interativa, `/agents off` no
-agente que estava forçado por `/agent` avisa e volta ao roteamento
-automático, em vez de deixar a sessão presa num agente que não roda.
-
-Duas consequências que vale saber:
-
-- **`--auto` e `--routing=classify` dependem do `claude`** — a chamada de
-  classificação é feita por ele especificamente. Com o `claude` desligado,
-  a classificação nem é tentada (não faz sentido chamar um agente que você
-  tirou de jogo); a tarefa cai no fallback de sempre (prompt de escolha, ou
-  erro fora de terminal interativo).
-- **Nunca dá pra desligar todos** — `.orquestradorrc`, `--without` e
-  `/agents off` recusam a última remoção, porque sem agente nenhum não
-  sobra nada pra rodar.
-
-O estado fica visível o tempo todo: a linha de status mostra `2/3 agentes`
-quando alguém está fora, e o `doctor` marca `(desligado no
-.orquestradorrc)` ao lado do CLI correspondente.
-
-### Retry automático em erros transitórios
-
-Vale pra qualquer jeito de rodar uma tarefa (`run`, modo interativo,
-lote com `;`): quando uma etapa falha por um erro que **pode** ser só um
-solavanco momentâneo — timeout, sessão que expirou no meio da chamada,
-ou um exit code não-zero sem cara de erro de sintaxe — o orquestrador
-tenta de novo automaticamente antes de propagar o erro, com backoff
-exponencial simples (1s, depois 2s, depois 4s...) e um máximo de 3
-retries por padrão (a tentativa inicial não conta nesse número).
-
-**Nem todo erro é retentado.** Comando não encontrado no PATH e
-argumento/sintaxe inválido falham direto na primeira tentativa — repetir
-não vai mudar o resultado, é sempre o mesmo erro de novo.
-
-Enquanto isso acontece, você vê uma mensagem indicando que uma nova
-tentativa está a caminho (pra não parecer que travou):
-
-```
-⟳ [antigravity] tentativa 1/3 falhou (timeout): "agy" excedeu o timeout de 180000ms — tentando de novo em 1000ms
-```
-
-No modo interativo, essa mensagem vira uma linha amarela no transcript
-(com o prefixo `Tarefa i/N` quando a tarefa faz parte de um lote via `;`),
-e o output ao vivo daquela etapa é reiniciado do zero na tentativa
-seguinte. Cada tentativa que falhou também fica registrada no histórico
-daquela etapa — `orquestrador history --last` mostra quantos retries uma
-etapa precisou e por quê, não só o resultado final.
-
-### `orquestrador run "<tarefa>"`
-
-Roda o fluxo completo pra uma tarefa — ou pra **várias tarefas independentes
-ao mesmo tempo**, passando mais de um argumento (ver "Paralelismo" abaixo).
-Por padrão, o roteamento de cada tarefa é decidido por palavra-chave no seu
-texto:
-
-| Sinal na tarefa                                                              | Agente         |
-| ----------------------------------------------------------------------------- | -------------- |
-| "pesquisar", "buscar", "o que é", "última versão de"                          | Antigravity    |
-| "implementar", "criar arquivo", "refatorar", "corrigir bug", "corrigir"        | Claude Code    |
-| os dois tipos de sinal ao mesmo tempo                                         | Antigravity → Claude Code, em sequência, com handoff de contexto |
-| nenhum sinal (ambíguo)                                                        | ver fallback abaixo |
-
-Flags:
-
-- **`--agent <claude|antigravity>`** — força um agente específico, ignora o
-  roteamento por completo. Tem prioridade sobre tudo, inclusive `--auto`.
-- **`--auto`** — quando o roteamento por palavra-chave não identifica nenhum
-  agente, faz uma chamada leve e separada ao `claude` pedindo só a
-  classificação da tarefa ("pesquisa" / "implementação" / "ambos") antes de
-  cair no prompt interativo. Essa chamada de classificação não é uma etapa
-  do pipeline e não entra no histórico. Sem efeito quando `--routing=classify`
-  (ver abaixo) — a classificação já sempre acontece nesse caso.
-- **`--routing <keyword|classify>`** (padrão `keyword`) — troca a
-  **estratégia** de roteamento inteira, não só o fallback de ambiguidade:
-  - `keyword` (padrão): o comportamento de sempre — palavra-chave primeiro,
-    `--auto` como fallback se não identificar nada.
-  - `classify`: classifica **toda** tarefa via `claude` antes de rodar,
-    mesmo uma com palavra-chave óbvia — pula a tabela acima inteiramente.
-    Mais lento (uma chamada extra ao `claude` antes da etapa real), mas
-    resolve tarefas sem nenhum sinal de palavra-chave sem precisar de
-    `--auto` nem do prompt interativo.
-
-**Fallback quando a tarefa é ambígua e nada mais resolveu:** o CLI pergunta
-no terminal qual agente usar (`claude`, `antigravity` ou `cancelar`). Se a
-entrada não for interativa (stdin não é um TTY — por exemplo, rodando em CI
-ou com output redirecionado), cancela direto com uma mensagem indicando
-`--agent`.
-
-#### Exemplos
-
-```bash
-orquestrador run "pesquisar a última versão do Node.js"
-# → roteia direto pro Antigravity
-
-orquestrador run "implementar um endpoint de login"
-# → roteia direto pro Claude Code
-
-orquestrador run "pesquisar a versão mais recente do Express e implementar o upgrade"
-# → Antigravity (pesquisa) primeiro, depois Claude Code (implementação),
-#   recebendo o output da pesquisa como contexto
-
-orquestrador run "revisar a stack do projeto" --agent claude
-# → força o Claude Code, ignora o roteamento por palavra-chave
-
-orquestrador run "e aí, isso aqui tá bom?" --auto
-# → tarefa ambígua por palavra-chave; classifica via claude antes de
-#   cair no prompt interativo
-
-orquestrador run "e aí, isso aqui tá bom?"
-# → tarefa ambígua, sem --auto: pergunta no terminal
-#   Escolha o agente ["claude" | "antigravity" | "cancelar"]:
-
-orquestrador run "descreva rapidamente o conceito de recursão" --routing=classify
-# → sem palavra-chave nenhuma (nem "pesquisar" nem "implementar"), mas
-#   --routing=classify resolve mesmo assim, sem prompt interativo —
-#   com o padrão (keyword) essa mesma tarefa cancelaria em stdin não-TTY
-
-orquestrador run "pesquisar a versão atual do TypeScript" "corrigir o typo no README"
-# → duas tarefas independentes, cada uma roteada e executada em paralelo
-#   (ver "Paralelismo" abaixo)
-```
-
-### Paralelismo: várias tarefas independentes
-
-Passar mais de um argumento pra `run` roda cada tarefa **concorrentemente**
-(cada `agy`/`claude` disparado é um processo de verdade rodando ao mesmo
-tempo, não só uma simulação) — cada tarefa resolve seu próprio plano e gera
-sua própria entrada no histórico, exatamente como se você tivesse rodado o
-comando várias vezes em paralelo manualmente.
-
-Isso só faz sentido quando as tarefas **não dependem uma da outra**. Dentro
-de uma mesma tarefa que precisa de pesquisa *e* implementação (a linha
-"ambos" da tabela acima), o handoff de contexto continua sequencial — o
-Claude Code não pode começar antes de receber o resultado do Antigravity,
-então essas duas etapas nunca rodam em paralelo entre si. O paralelismo é
-só entre tarefas top-level que você lista separadamente na chamada.
-
-Duas diferenças importantes em relação ao modo de uma tarefa só:
-
-- **Sem fallback interativo.** Não dá pra abrir um prompt `readline` por
-  tarefa concorrente sem confundir qual pergunta é de qual — então, com
-  várias tarefas, uma tarefa ambígua que `--auto` não resolveu vira
-  simplesmente um erro reportado *só pra ela*, sem derrubar as outras.
-- **`--agent` e `--auto` se aplicam a todas as tarefas do lote igualmente**
-  — pra forçar um agente diferente por tarefa individual, use o prefixo
-  `agente:` (ver abaixo).
-
-```bash
-orquestrador run "pesquisar X" "corrigir Y" "implementar Z"
-# roda as três ao mesmo tempo; se "corrigir Y" falhar, "pesquisar X" e
-# "implementar Z" ainda são reportadas normalmente
-
-orquestrador run "t1" "t2" "t3" "t4" "t5" --concurrency 2
-# no máximo 2 processos de agente ativos por vez
-```
-
-`--concurrency` limita quantas rodam ao mesmo tempo (padrão 4). Sem teto, um
-lote grande subiria um processo de CLI de agente por tarefa, todos de uma vez.
-
-> ⚠️ **Estas tarefas compartilham o diretório atual.** Elas rodam de verdade em
-> paralelo, sem lock: se duas tocarem o mesmo arquivo, uma sobrescreve a outra
-> sem aviso. Dentro de um repositório git o comando avisa disso. Para trabalho
-> concorrente que **altera arquivos**, use `orquestrador team run` — lá cada
-> subtarefa tem worktree própria e há uma etapa de integração.
-
-#### Agente por tarefa dentro de um lote (`agente:` no início da tarefa)
-
-Prefixe uma tarefa individual com `claude:` ou `antigravity:` (dois pontos
-logo depois do nome) pra forçar o agente **só daquela tarefa**, sem afetar
-as outras do mesmo lote nem precisar de `--agent`/`--auto` global. Vale
-tanto pro `run` com múltiplos argumentos quanto pro `;` da TUI (ver
-"Modo interativo" acima).
-
-```bash
-# Dois agentes codificando em paralelo, cada um numa tarefa diferente —
-# ambas as tarefas têm keyword de implementação, mas o prefixo decide:
-orquestrador run "claude: implementar o endpoint de login" "antigravity: implementar a tela de cadastro"
-```
-
-```
-# mesma ideia na TUI, numa linha só:
-claude: implementar o endpoint de login; antigravity: implementar a tela de cadastro
-```
-
-O prefixo é removido antes do texto virar o prompt de verdade — o agente
-recebe só "implementar o endpoint de login", não "claude: implementar...".
-Sem prefixo, a tarefa continua caindo no roteamento de sempre (palavra-chave
-ou `--auto`).
-
-**Prioridade quando mais de uma coisa tenta decidir o agente:** `--agent`/
-`/agent` **global** (vale pro lote inteiro) > **prefixo por tarefa** >
-roteamento automático (palavra-chave / `--auto`). Ou seja, `--agent` global
-sempre vence, mesmo se alguma tarefa tiver um prefixo diferente:
-
-```bash
-orquestrador run "claude: implementar X" "claude: implementar Y" --agent antigravity
-# → as duas rodam no antigravity mesmo assim — --agent global sobrescreve o prefixo
-```
-
-Nome de agente inválido no formato de prefixo (`foo: implementar algo`) dá
-um erro claro **só pra aquela tarefa** — `Prefixo de agente inválido:
-"foo:"...` — sem derrubar as outras tarefas do lote.
-
-### `orquestrador history`
-
-Lista as execuções passadas, mais recente primeiro:
-
-```bash
-orquestrador history
-```
-
-**Filtrado por projeto quando há um `.orquestradorrc` por perto** (ver
-"Configuração por projeto" abaixo): se `orquestrador` acha um `.orquestradorrc`
-subindo a partir do diretório atual, `history` mostra só as execuções
-rodadas dentro daquele projeto (o diretório do `.orquestradorrc` ou
-qualquer subpasta dele) — não o histórico global inteiro. Um aviso aparece
-no topo confirmando o filtro:
-
-```
-Mostrando só execuções deste projeto (/home/voce/meu-projeto) — use --all pro histórico completo.
-```
-
-Sem `.orquestradorrc` nenhum encontrado, `history` continua mostrando tudo,
-sem filtro nenhum (comportamento de sempre). Pra ver o histórico completo
-mesmo dentro de um projeto configurado, use `--all`:
-
-```bash
-orquestrador history --all
-```
-
-### `orquestrador history --last`
-
-Mostra o detalhe da última execução — cada etapa, agente, prompt enviado
-(já com o contexto da etapa anterior embutido, quando houver), output,
-duração, e uma referência de qual etapa alimentou qual. Segue a mesma regra
-de filtro por projeto/`--all` do `history` normal — "última" quer dizer "a
-mais recente deste projeto" quando há um `.orquestradorrc`, não a mais
-recente entre todos os projetos:
-
-```bash
-orquestrador history --last
-orquestrador history --last --all   # ignora o filtro por projeto
-```
-
-**Tokens e custo, quando disponível:** o Claude Code expõe uso de tokens e
-custo real em dólar (não uma estimativa nossa) via `--output-format json`.
-Cada etapa rodada pelo `claude` mostra uma linha como:
-
-```
-tokens: entrada 2 · saída 105 · cache leitura 16777 · cache criação 47517 · custo US$ 0.19
-```
-
-e o topo do relatório mostra o custo total do run. **O Antigravity não
-mostra custo** — ele também expõe tokens via `--output-format json`, mas
-usar isso trocaria o streaming ao vivo dele (real) por uma resposta única
-no final, então a decisão foi preservar o streaming e não coletar
-tokens/custo dele. Quando nem toda etapa reporta custo, o resumo avisa que
-é parcial (`(1/2 etapas reportaram custo — parcial)`) em vez de fingir que
-é o total do run. Ver "Limitações conhecidas" pro detalhe completo.
-
-### `orquestrador export <runId>`
-
-Gera um **relatório em markdown** de uma execução do histórico — o que
-cada agente fez, prompts, outputs completos, duração de cada etapa,
-tokens/custo (quando disponível) e retries (quando houve):
-
-```bash
-orquestrador export c97f3333                          # imprime no stdout
-orquestrador export c97f3333-a1c5-4099-9906-983b84440a49  # id completo também funciona
-orquestrador export c97f3333 --output relatorio.md     # ou -o, salva num arquivo
-```
-
-`<runId>` aceita o id completo ou só o prefixo de 8 caracteres já mostrado
-em `orquestrador history` (mesma ideia de hash curto do `git`). Se não
-achar uma correspondência exata, tenta por prefixo e usa a execução mais
-recente em caso de mais de uma bater. Um id que não existe retorna erro
-com exit code 1, sem gerar nada. **Não é afetado pelo filtro por
-projeto** — o id já identifica uma execução específica sem ambiguidade
-nenhuma, então não faz sentido "limitar" o `export` a um projeto.
-
-## Configuração por projeto (`.orquestradorrc`)
-
-Um arquivo `.orquestradorrc` opcional, em JSON, na raiz de um projeto,
-configura o comportamento padrão do `orquestrador` **só nesse projeto** —
-sem precisar repetir flags toda vez nem afetar outros projetos na mesma
-máquina.
+O repositório precisa estar limpo e ter pelo menos um commit. Um plano pode
+definir `dependsOn`, `owns` e `acceptance` para tornar dependências, áreas de
+arquivo e critérios de conclusão explícitos:
 
 ```json
 {
-  "agent": "claude",
-  "disabledAgents": ["antigravity"],
+  "tasks": [
+    {
+      "id": "api",
+      "agent": "codex",
+      "task": "Implementar a API de sessão",
+      "dependsOn": [],
+      "owns": ["src/api/**"],
+      "acceptance": "npm test passa"
+    },
+    {
+      "id": "ui",
+      "agent": "claude",
+      "task": "Implementar o formulário de login",
+      "dependsOn": ["api"],
+      "owns": ["src/ui/**"],
+      "acceptance": "npm test passa"
+    }
+  ]
+}
+```
+
+Tarefas paralelas que declararem áreas sobrepostas são recusadas antes de
+iniciar agentes. Use `team status <id> --follow` para acompanhar a execução e
+`team send <id> <tarefa|all> "mensagem"` para enviar instruções.
+
+### Depois de uma equipe
+
+```bash
+node dist/cli.js team list
+node dist/cli.js team status <id> --messages
+
+# Marca uma execução cujo processo morreu como encerrada, preservando arquivos.
+node dist/cli.js team recover <id>
+
+# Remove worktrees limpas; use as flags destrutivas somente após revisar o resultado.
+node dist/cli.js team cleanup <id>
+node dist/cli.js team cleanup <id> --force --delete-branches
+```
+
+Se um merge de dependência ou integração entrar em conflito, a worktree é
+preservada para resolução manual. Use `git merge --abort` nela se decidir
+descartar aquele merge pendente.
+
+## Configuração por projeto
+
+Crie `.orquestradorrc` na raiz do projeto para definir preferências locais:
+
+```json
+{
   "routing": "keyword",
-  "auto": false,
-  "maxRetries": 5,
-  "retryBaseDelayMs": 2000,
+  "disabledAgents": ["antigravity"],
   "team": {
     "agents": ["claude", "codex"],
     "concurrency": 2,
-    "timeoutMs": 300000,
-    "bootstrap": ["npm", "ci"],
-    "bootstrapTimeoutMs": 600000
+    "bootstrap": ["npm", "ci"]
   }
 }
 ```
 
-Todos os campos são opcionais — configure só o que quiser mudar do padrão:
+`bootstrap` é uma lista de programa e argumentos, executada sem shell dentro
+de cada worktree antes da subtarefa. Ele é útil para preparar dependências, mas
+pode aumentar o tempo e o uso de rede. Flags da CLI têm prioridade sobre as
+preferências equivalentes do arquivo.
 
-| Campo              | Equivale a         | Efeito                                                                 |
-| ------------------ | ------------------ | ----------------------------------------------------------------------- |
-| `agent`             | `--agent`           | Força esse agente pra toda tarefa rodada neste projeto.                 |
-| `disabledAgents`    | `--without`         | Tira agentes de jogo neste projeto (cota esgotada, CLI ausente).        |
-| `routing`           | `--routing`         | Estratégia de roteamento (`"keyword"` ou `"classify"`).                 |
-| `auto`              | `--auto`            | Liga a classificação via IA quando a palavra-chave não decide nada.     |
-| `maxRetries`        | *(sem flag ainda)*  | Máximo de tentativas de retry por etapa em erro transitório.            |
-| `retryBaseDelayMs`  | *(sem flag ainda)*  | Base do backoff exponencial do retry, em milissegundos.                 |
-| `team`              | `team run`          | Defaults de equipe: agentes, concorrência, timeout e bootstrap.         |
+## Perfis de agentes
 
-Em `team`, `bootstrap` é uma lista de programa e argumentos, sem expansão de
-shell: `["npm", "ci"]` executa `npm ci` dentro de cada worktree imediatamente
-antes do agente. Ele é útil quando cada subtarefa precisa de dependências, mas
-pode custar tempo e rede; omita-o quando o projeto não precisar dessa preparação.
-
-**Descoberta:** igual ao `CLAUDE.md` do Claude Code — `orquestrador`
-procura um `.orquestradorrc` a partir do diretório onde foi rodado,
-subindo um nível de cada vez até achar um ou chegar na raiz do sistema de
-arquivos. O primeiro que encontrar (o mais próximo do diretório atual)
-vale — não é feita fusão de vários níveis.
-
-**Prioridade em cada campo:** flag de CLI > `.orquestradorrc` do projeto >
-default global do orquestrador. `maxRetries`/`retryBaseDelayMs` ainda não
-têm uma flag de CLI própria, então pra eles a prioridade é só
-`.orquestradorrc` > default global.
-
-```bash
-cd meu-projeto   # tem .orquestradorrc com "agent": "claude"
-orquestrador run "pesquisar a versão do node"
-# → roda no claude mesmo com keyword de pesquisa, porque o projeto força isso
-
-orquestrador run "pesquisar a versão do node" --agent antigravity
-# → roda no antigravity — a flag de CLI sempre vence sobre o .orquestradorrc
-```
-
-Um campo com valor ou tipo inválido (`"agent": "gpt-5"`, `"maxRetries":
-"cinco"`) é ignorado com um aviso claro no início do comando — só aquele
-campo é descartado, o resto do arquivo continua valendo:
-
-```
-.orquestradorrc: "agent": "gpt-5" inválido (use "claude" ou "antigravity") — ignorado.
-```
-
-Vale tanto pro `orquestrador run` quanto pra TUI (`orquestrador` sem
-argumentos) aberta dentro do projeto — `agent`/`routing`/`auto` seedam o
-modo inicial da tela (ainda dá pra trocar depois com `/agent`/`/routing`/
-`/auto`).
+Use [`.agents`](.agents/README.md) para manter instruções específicas do
+projeto em revisão de código. No modo `team`, o orquestrador pede que cada
+agente leia `team.md` e seu perfil (`claude.md`, `codex.md` ou
+`antigravity.md`) antes de trabalhar. Esses arquivos definem responsabilidades
+e convenções; não guardam segredos nem concedem permissões.
 
 ## Arquitetura
 
-```
-  orquestrador run "<tarefa>"
-       │
-       ▼
-┌────────────┐
-│ router.ts  │  decide o plano (--routing=keyword: por
-│ planTask() │  palavra-chave, --auto/prompt interativo
-└────────────┘  como fallback; --routing=classify: via IA)
-       │  plano = [ {agente, prompt}, ... ]
-       ▼
-┌───────────────┐
-│ pipeline.ts   │
-│ runPipeline() │  roda cada etapa do plano, em ordem
-└───────────────┘
-       │
-       ▼
-┌──────────────────────────────────────────┐
-│ agents/antigravity.ts  (agy -p "...")    │
-│ agents/claudeCode.ts   (claude -p "...") │
-└──────────────────────────────────────────┘
-       │  output da etapa vira "context" da
-       │  próxima etapa do plano (handoff)
-       ▼
-┌─────────────────────────────────────┐
-│ storage/history.ts                  │
-│ SQLite (~/.orquestrador/history.db) │
-│ runs + steps; fed_by_step_id liga   │
-│ cada etapa à etapa que a alimentou  │
-└─────────────────────────────────────┘
-```
+| Área | Responsabilidade |
+| --- | --- |
+| `src/agents/` | Adaptadores para os CLIs externos e disponibilidade de agentes |
+| `src/orchestrator/` | Roteamento, handoff e agendamento concorrente |
+| `src/team/` | Planos, worktrees, contratos, orçamento e ciclo de vida das equipes |
+| `src/tui/` | Interface Ink e comandos interativos |
+| `src/storage/` | Histórico local de execuções |
 
-- **`src/orchestrator/router.ts`** — `planTask()` monta o plano de etapas por
-  palavra-chave (função pura, sem I/O). `classifyTaskWithClaude()` é o
-  roteador "via IA" — usado como estratégia primária inteira com
-  `--routing=classify`, ou só como fallback de ambiguidade quando `--auto`
-  está ativo e `planTask` não decidiu nada (`--routing=keyword`, o padrão);
-  faz uma chamada isolada ao `claude` e nunca é logada como etapa do
-  pipeline. `parseTaskAgentPrefix()` reconhece o prefixo `claude:`/
-  `antigravity:` no início de uma tarefa.
-- **`src/orchestrator/pipeline.ts`** — `runPipeline()` resolve o plano final
-  de uma tarefa (`--agent` global → prefixo por tarefa → estratégia de
-  roteamento `--routing` → prompt interativo/erro) e roda cada etapa em
-  sequência, repassando o output de uma etapa como `context` de entrada da
-  próxima. Loga cada etapa (sucesso ou erro) no histórico. `runPipelines()`
-  roda várias tarefas independentes chamando `runPipeline()` uma vez por
-  tarefa — cada uma com seu próprio `runId`, sem afetar as outras se uma
-  falhar.
-- **`src/orchestrator/scheduler.ts`** — o kernel de execução paralela que
-  `runPipelines()` e o modo `team` compartilham: semáforo de concorrência,
-  grafo de dependências e cancelamento em cascata. Agnóstico de agente, Git
-  e histórico — não importa nada de `agents/`, `team/` ou `storage/`; quem
-  chama decide o que uma "tarefa" faz. Antes existiam dois motores paralelos
-  independentes com garantias opostas (um sem teto, isolamento ou
-  cancelamento; o outro com tudo isso e nenhuma observabilidade), e unificá-los
-  é o que deu ao lote de `run` o cancelamento e o teto que só o `team` tinha.
-- **`src/team/`** — o modo de equipe: `coordinator.ts` (orquestra worktrees,
-  mailbox, contratos e integração, delegando o escalonamento ao kernel acima),
-  `plan.ts` (valida o DAG, a posse de arquivos e os critérios de aceite),
-  `worktrees.ts` (as chamadas de Git), `mailbox.ts` (mensagens best-effort
-  entre agentes), `contracts.ts` (o quadro de acordos com dono e lockfile),
-  `budget.ts` (tetos de custo/tempo) e `persistence.ts` (snapshot com debounce
-  + `events.jsonl` append-only, ambos assíncronos, para que o caminho quente
-  não trave o event loop).
-- **`src/agents/`** — wrappers finos em volta de `execa` que disparam
-  `claude -p "..."` e `agy -p "..." --print-timeout 3m`, com timeout
-  configurável e tratamento consistente de erro (timeout, comando não
-  encontrado, sessão expirada, exit code não-zero). Aceitam um `onChunk`
-  opcional ligado direto no stream de stdout do processo — só repassa o
-  que o CLI subjacente realmente escreve, sem simular nada nesse nível.
-  `agents/shared.ts` (`runAgentCommand`) também é onde mora o retry
-  automático: um loop de backoff exponencial em torno de uma única
-  tentativa, que só repete erros classificados como transitórios
-  (`RETRYABLE_AGENT_ERROR_KINDS` em `types.ts`) e devolve o histórico de
-  tentativas que falharam (`retries`) junto do resultado final, seja
-  sucesso ou erro. `agents/registry.ts` é a fonte única de "quais agentes
-  existem" (`AGENT_REGISTRY`, `AGENT_NAMES`, `isAgentName()`) — pipeline,
-  router, CLI e TUI leem de lá em vez de hardcodar os nomes; ver
-  `CLAUDE.md` ("Adicionando um novo agente") pro passo a passo de estender
-  isso pra outros agentes. `agents/claudeCode.ts` chama `claude -p`
-  com `--output-format json` e faz o parsing do envelope pra extrair o
-  texto de resposta e o uso de tokens/custo real. `agents/codex.ts` extrai
-  a resposta e tokens do JSONL de `codex exec`; Antigravity preserva stdout
-  incremental (ver "Limitações conhecidas").
-- **`src/storage/history.ts`** — persistência em SQLite
-  (`~/.orquestrador/history.db`, sempre global — um banco só, não por
-  projeto). Cada etapa grava `fed_by_step_id` apontando pro id da etapa
-  anterior cujo output virou seu contexto — é o que permite reconstruir a
-  cadeia de handoff depois, via `history --last` —, `retries` (JSON com
-  cada tentativa que falhou antes do resultado final daquela etapa), e
-  `usage` (JSON com tokens/custo, quando o agente expõe isso). Cada *run*
-  grava `cwd` (`process.cwd()` no momento do `startRun()`) — é o que
-  permite ao `history`/`history --last` filtrar por projeto
-  (`isWithinProjectScope`, função pura: cwd é a raiz do projeto ou um
-  descendente dela). `getRunById(id)` busca uma execução por id completo
-  ou prefixo de 8 caracteres, usado pelo `export` — sem filtro de projeto,
-  de propósito (ver "Configuração por projeto" acima).
-- **`src/config.ts`** — `discoverProjectConfig()` acha e lê o
-  `.orquestradorrc` mais próximo, subindo diretórios a partir do cwd (só
-  fs, sem tocar em SQLite); `parseOrquestradorConfig()` valida campo por
-  campo, descartando com aviso o que for inválido em vez de invalidar o
-  arquivo inteiro; `resolveConfigValue(cliValue, projectValue)` implementa
-  a prioridade CLI > projeto (o default global já embutido mais embaixo,
-  em `pipeline.ts`/`agents/shared.ts`, quando o valor ainda chega
-  `undefined` até lá).
-- **`src/reporting.ts`** — `buildMarkdownReport(run)`, função pura que
-  monta o relatório markdown do `export` a partir de um `HistoryRun` — sem
-  I/O nenhum, só formatação, testável com dados mockados.
-- **`src/cli.ts`** — entrypoint (`commander`) com os comandos `run`,
-  `history` e `export`, spinner (`ora`) e cores (`chalk`). Descobre o
-  `.orquestradorrc` uma vez, no início, e reaproveita pra todos os
-  comandos (inclusive a TUI). Sem argumentos (zero subcomando), importa
-  dinamicamente `src/tui/startTui.tsx` — quem só usa `run`/`history`/
-  `export` não paga o custo de carregar Ink/React.
-- **`src/tui/`** — tela interativa em Ink/React (`App.tsx` + `startTui.tsx`
-  + `commands.ts` + `PromptInput.tsx`). Reaproveita `runPipeline()` e
-  `listRuns()` sem alterar nada neles; tem sua própria versão do prompt de
-  ambiguidade (via estado do React, não `readline`) porque Ink assume o
-  controle do terminal. O input de texto (`PromptInput.tsx`) também é
-  implementação própria, não `ink-text-input` — ver "Testes" abaixo. Pro
-  streaming, `App.tsx` passa `onStepStart`/`onChunk`/`onStepComplete` pro
-  `runPipeline()` e só acumula o que chega num estado local — a decisão de
-  "é real ou simulado" já vem pronta do pipeline, a tela só exibe. Múltiplas
-  tarefas na mesma linha (separadas por `;`) reaproveitam `runPipelines()`
-  (o mesmo usado pelo `run "<t1>" "<t2>"` não-interativo) em vez de uma
-  implementação paralela própria — só passa as versões com índice de
-  tarefa dos três callbacks de streaming (`onTaskStepStart`/`onTaskChunk`/
-  `onTaskStepComplete`), e nunca `resolveAmbiguousAgent` (tarefa ambígua
-  no lote vira erro, não prompt).
-
-## Testes
+## Desenvolvimento
 
 ```bash
-npm test          # roda a suíte (vitest run)
-npm run test:watch
+npm run dev -- doctor
+npm test
+npm run build
 ```
 
-Os testes de `router.ts` e `pipeline.ts` mockam os wrappers de agente
-(`src/agents/*.ts`) e o storage — a suíte **nunca chama `claude`/`agy` de
-verdade**. Cobrem: as 4 combinações de roteamento por palavra-chave, as 3
-classificações possíveis do `--auto` (mais falha e resposta inesperada),
-`parseTaskAgentPrefix` (prefixo `claude:`/`antigravity:` reconhecido e
-removido do texto, case-insensitive, tolerando espaço antes do `:`, uma
-frase comum com `:` no meio não sendo confundida com prefixo, e nome de
-agente desconhecido no formato de prefixo sinalizado como inválido sem
-alterar o texto), `--agent` forçado, split com handoff de contexto, tarefa
-ambígua com e sem resolvedor, cancelamento, falha de agente propagando
-erro, prefixo por tarefa (`claude:`/`antigravity:`) forçando o agente e
-removendo o prefixo do prompt de verdade, `--agent` global sobrescrevendo
-o prefixo por tarefa, e prefixo com nome de agente inválido lançando erro
-claro sem chamar nenhum agente nem abrir run — no lote (`runPipelines`),
-cada tarefa pode ter seu próprio prefixo independente das outras, e uma
-tarefa com prefixo inválido vira um resultado de erro pontual sem afetar
-as demais. Estratégia de roteamento: `--routing=keyword` (padrão) continua
-chamando `planTask` primeiro sem nunca classificar, `--routing=classify`
-pula `planTask` mesmo numa tarefa com palavra-chave óbvia, `--auto` fica
-sem efeito extra com `--routing=classify` (nunca uma segunda classificação
-redundante), classificação falhando com `--routing=classify` cai pro
-resolvedor de ambiguidade igual ao fluxo padrão, `forceAgent` (global ou
-prefixo) sempre tem prioridade sobre qualquer `--routing`, e o lote
-(`runPipelines`) repassa a estratégia pra cada tarefa independentemente.
-Uso de tokens/custo: `result.usage` é repassado pro histórico quando o
-agente expõe isso, e uma etapa sem usage loga isso explicitamente como
-ausente em vez de inventar um valor. `runPipelines`
-(mapeamento tarefa → resultado, falha parcial isolada, tarefa ambígua no
-lote virando erro pontual, e uma checagem de que a execução é concorrente de
-verdade — tempo total bem abaixo da soma dos delays individuais), e
-streaming (chunks reais repassados sem passar pela simulação pro agente que
-streama de verdade, a simulação reconstruindo o texto original sem perda
-pro agente que não streama, e cada etapa virando uma entrada de resultado
-assim que ela termina — sem esperar o resto do plano), e `runPipelines`
-com streaming por índice de tarefa: `onTaskStepStart`/`onTaskChunk`/
-`onTaskStepComplete` chegando com o índice certo pra cada tarefa do lote,
-chunks de duas tarefas concorrentes (uma real via antigravity, outra
-simulada via claude) não se misturando entre si, tarefa ambígua no lote
-virando erro em vez de abrir prompt mesmo com callbacks de streaming
-presentes, e a integração de retry (`logStep` recebendo o array de
-tentativas que falharam tanto no sucesso final quanto no erro esgotado,
-`maxRetries`/`onRetry` repassados pro wrapper com o agente já amarrado, e
-`onTaskRetry` chegando com o índice certo da tarefa do lote).
+As integrações externas são adaptadas atrás de interfaces testáveis; a suíte
+não chama modelos reais. Alguns testes de equipe usam repositórios Git
+temporários para validar worktrees e merges de verdade.
 
-`src/agents/shared.test.ts` cobre o loop de retry em si (mockando
-`execa`, sem chamar `claude`/`agy` de verdade): sucesso depois de 1 retry,
-a sequência completa de backoff exponencial (1s, 2s, 4s) até o sucesso na
-4ª tentativa, esgotamento de `maxRetries` propagando o erro final já com
-o histórico de tentativas embutido, os dois casos de erro não-elegível
-pra retry (comando não encontrado / argumento inválido) falhando direto
-na primeira tentativa, e — a preocupação real por trás de rodar retries
-dentro de um lote paralelo (`;` na TUI ou `run "<t1>" "<t2>"`) — dois
-testes confirmando que o backoff de uma chamada não atrasa uma chamada
-concorrente: um com timers falsos provando isso de forma determinística
-(a chamada sem retry já resolveu antes do timer de 1s da outra sequer
-disparar), e outro com timers de verdade medindo tempo de parede (a
-chamada sem retry resolve em bem menos de 1s mesmo com a outra presa no
-backoff, e o tempo total do par fica perto do delay de uma tarefa sozinha,
-não da soma das duas), e `retryBaseDelayMs` customizado mudando a base do
-backoff (ex.: um `.orquestradorrc` pedindo delays maiores).
+## Limitações atuais
 
-`src/config.test.ts` cobre `parseOrquestradorConfig` (config completo e
-válido, objeto vazio válido, JSON inválido ou que não é um objeto
-ignorando o arquivo inteiro com aviso, cada campo — `agent`/`routing`/
-`auto`/`maxRetries`/`retryBaseDelayMs` — sendo validado e
-descartado individualmente quando inválido sem afetar os outros campos, e
-múltiplos campos inválidos gerando um aviso cada), `resolveConfigValue`
-(prioridade CLI > projeto > `undefined`), e `discoverProjectConfig` (acha
-o `.orquestradorrc` no próprio diretório de partida, sobe diretórios até
-achar o mais próximo — mesma ideia do `CLAUDE.md` do Claude Code —, o mais
-próximo do cwd vence sobre um mais acima sem fundir os dois, `undefined`
-quando não acha nenhum subindo até a raiz do sistema de arquivos, e os
-avisos de parsing chegam até quem descobriu o arquivo). Usa diretórios
-temporários reais (não mocka `fs`) pra testar a subida de diretório de
-verdade.
-
-`src/storage/history.test.ts` cobre `isWithinProjectScope` (a lógica de
-"esse cwd pertence a este projeto?"): bate exato na própria raiz do
-projeto, bate em qualquer descendente dela, **não** bate num diretório
-irmão com prefixo parecido (`/projeto-outro` não é descendente de
-`/projeto`) nem num diretório pai do projeto nem em algo completamente não
-relacionado, e cwd ausente (runs de antes dessa coluna existir) nunca bate
-em projeto nenhum. A integração completa (`listRuns`/`getLastRun`
-filtrando de verdade via SQLite, `--all` ignorando o filtro) foi validada
-manualmente — mesma decisão já tomada pro resto de `storage/history.ts`
-(ver "Limitações conhecidas" e `CLAUDE.md`).
-
-`src/agents/registry.test.ts` cobre a estrutura do registro de agentes:
-`AGENT_REGISTRY` tem as entradas claude/antigravity/codex, cada
-`runner` aponta pra mesma referência de função do wrapper de verdade,
-`streamsIncrementally` reflete o probe manual documentado, `AGENT_NAMES`
-é derivado das chaves do registro (não uma lista hardcoded separada), e
-`isAgentName` reconhece os dois agentes e rejeita nomes desconhecidos.
-
-`src/agents/claudeCode.test.ts` (mockando `execa`) cobre o parsing do
-envelope `--output-format json`: chama o claude com a flag certa, extrai
-o texto de resposta e o usage completo (tokens + custo real em USD) do
-envelope, envelope sem usage/custo não quebra nada (campos ausentes em
-vez de erro), e stdout que não é JSON válido (ou que é JSON mas sem o
-campo `result` esperado) cai pro texto bruto sem lançar exceção.
-
-`src/reporting.test.ts` cobre `buildMarkdownReport` com `HistoryRun`
-mockado, sem nenhum SQLite de verdade envolvido: título/metadados/
-contagem de etapas, formatação de duração, "alimentada pela etapa #N"
-quando há handoff, execução não finalizada mostrando isso explicitamente,
-etapa com erro mostrando o erro em vez do output, tabela de retries (com
-`|` escapado numa mensagem), usage só com tokens não gerando linha de
-custo, usage com custo aparecendo na etapa e no resumo do run, custo
-abaixo de 1 centavo com mais casas decimais pra não virar US$ 0.00, e
-custo parcial (só algumas etapas) avisando isso em vez de fingir que é o
-total do run.
-
-`src/tui/commands.ts` (o parsing de slash command, o parsing de `;` pra
-múltiplas tarefas, e o estado de modo da TUI) também tem testes — é
-lógica pura, sem depender de renderizar a tela de verdade: `/agent
-claude|antigravity` forçando o agente, `/agent auto` resetando pro
-roteamento normal, `/auto` alternando o estado, `/routing keyword|classify`
-mudando a estratégia mantendo o resto do estado, os três sendo
-independentes entre si, comando desconhecido/argumento inválido sempre
-virando erro (nunca uma tarefa, nunca uma exceção), 2+ tarefas separadas
-por `;` virando `{ kind: "tasks" }` com os textos aparados, e `;` solto ou
-sobrando no final caindo de volta pro `{ kind: "task" }` original.
-
-`src/tui/App.tsx` (o componente Ink em si) também tem cobertura, via
-[`ink-testing-library`](https://github.com/vadimdemedes/ink-testing-library)
-— renderiza a tela de verdade contra um stdin/stdout falso, mockando
-`runPipeline`/`runPipelines`/`listRuns` (nunca chama `claude`/`agy`).
-Cobre: o banner aparecendo uma única vez, o fluxo completo de uma tarefa
-(spinner → resultado → input ativo de novo), o prompt de ambiguidade
-embutido (escolher um agente e cancelar), os slash commands (`/agent`,
-`/auto`, `/history`, comando desconhecido, `/exit`) refletindo na
-`StatusLine` e no transcript, digitação em rajada sem nenhum caractere
-perdido (a suíte inclui casos escrevendo vários caracteres seguidos, sem
-esperar entre eles, especificamente pra provar isso — ver "input de texto
-próprio" abaixo), a prévia de rota (`→ agente`) respeitando um prefixo
-`agente:` na tarefa mesmo quando a palavra-chave indicaria outro agente,
-e múltiplas tarefas via `;`: duas tarefas rodando em paralelo com cada
-resultado aparecendo no bloco `Tarefa i/N` certo, streaming intercalado de
-duas fontes aparecendo em caixas ao vivo separadas sem misturar, tarefa
-ambígua dentro do lote virando erro sem nunca abrir o prompt embutido, e
-duas tarefas do mesmo lote com prefixos diferentes mostrando a prévia de
-rota certa cada uma, mesmo com a mesma palavra-chave nas duas; e
-`/routing`: muda a estratégia e reflete na `StatusLine` sem afetar
-`/agent`/`/auto` já setados, argumento inválido mostra erro sem mudar o
-estado, e uma tarefa rodada depois chega em `runPipeline` com a estratégia
-certa de verdade (não só na exibição).
-`promptForAgent` (`src/cli.ts`, o fallback
-interativo do modo não-TUI) continua sem teste automatizado — é
-`readline` puro, sem a alternativa de um stdin falso.
-
-O input de texto da TUI (`src/tui/PromptInput.tsx`) é implementação
-própria, não a biblioteca `ink-text-input` — ela tinha um bug real de
-perda de caractere em digitação rápida (o cálculo do próximo valor partia
-de uma prop desatualizada quando duas teclas chegavam antes do React
-re-renderizar entre uma e outra). `PromptInput` guarda o valor "de
-verdade" numa `ref`, atualizada de forma síncrona a cada tecla, em vez de
-depender do valor de um render anterior. Ver `CLAUDE.md` (bug #4) pro
-histórico completo.
-
-## Limitações conhecidas (MVP)
-
-- `planTask` e `classifyTaskWithClaude` avaliam a tarefa inteira; não fazem
-  split textual real de uma frase em pedaços — cada etapa recebe o texto
-  integral do prompt original, o handoff é só de *output* entre etapas.
-- Sem sistema de migração de schema no SQLite de verdade — em geral, uma
-  mudança de schema exige apagar `~/.orquestrador/history.db` em bancos
-  antigos. A coluna `retries` foi a única exceção (migração pontual e
-  guardada, não um mecanismo genérico).
-- Retry automático não tenta de novo `PipelineCancelledError` nem erro de
-  roteamento ambíguo — só erros de execução do agente (`AgentError`) que
-  parecem transitórios. O número de retries (`maxRetries`, padrão 3) e a
-  base do backoff (`retryBaseDelayMs`, padrão 1000ms, dobrando a cada
-  tentativa) são configuráveis via `.orquestradorrc`, mas **ainda não têm
-  uma flag de CLI própria** (`--max-retries`, por exemplo) — só quem chama
-  `runPipeline`/`runPipelines` programaticamente, ou configura por
-  projeto, tem controle fino sobre isso hoje.
-- A heurística que separa "argumento inválido" (não retenta) de "exit code
-  momentâneo" (retenta) é baseada em palavras comuns no stderr ("unknown
-  option", "usage:", etc.) — **nunca foi validada contra a mensagem real**
-  que `claude -p`/`agy -p` produzem pra um argumento inválido de verdade.
-  Pode ter falso positivo (um log de diagnóstico não relacionado que
-  contenha uma dessas palavras, ex. "usage:" numa mensagem sobre uso de
-  memória, cancelando um retry que deveria ter acontecido) ou falso
-  negativo (uma mensagem de erro num formato que a heurística não
-  reconhece, cai em `nonzero_exit` genérico e é retentada à toa — pior
-  caso, ~7s de atraso extra, não perda de dados). Na prática baixo risco
-  hoje: os argumentos passados pros dois CLIs são fixos nos wrappers, o
-  texto da tarefa nunca é reinterpretado como flag.
-- **Custo em USD só é rastreado pro Claude Code; Codex também registra tokens** — o Antigravity
-  também expõe isso via `--output-format json` (confirmado, não é falta de
-  suporte no CLI dele), mas usar essa flag trocaria o streaming real dele
-  por uma resposta única no final; a decisão foi preservar o streaming.
-  Além disso, a chamada de classificação de `--routing=classify`/`--auto`
-  também gasta tokens/custo de verdade (usa o claude por baixo), mas como
-  ela nunca é logada como etapa do pipeline, esse custo não aparece em
-  lugar nenhum — não é uma quantia grande (prompt curto), mas é real.
-  `history --last`/`export` só mostram custo por execução — sem uma visão
-  agregada de custo total ao longo do tempo.
-- `--routing=classify` classifica em só três categorias fixas
-  ("pesquisa"/"implementação"/"ambos", mapeadas pra antigravity/claude/os
-  dois) — um terceiro agente adicionado ao registro (ver "Arquitetura") não
-  passa a ser considerado pela classificação automaticamente, precisaria
-  reescrever o prompt de classificação. `--auto`/`/auto` ligado junto com
-  `--routing=classify` não avisa que ficou sem efeito (é ignorado
-  silenciosamente, não um erro).
-- Paralelismo é só entre tarefas top-level independentes (várias tarefas
-  na mesma chamada de `run`); dentro de uma tarefa que gera handoff
-  (pesquisa → implementação), a execução continua sequencial por design —
-  há uma dependência real de dados ali, não dá pra paralelizar.
-- O prefixo `agente:` por tarefa (ver "Agente por tarefa dentro de um lote"
-  acima) reconhece só um token único logo no início, seguido de `:` — uma
-  tarefa que legitimamente começa com "palavra: resto" sem ter nada a ver
-  com escolha de agente (ex.: "TODO: revisar X", "obs: lembrar de Y") vai
-  ser interpretada como uma tentativa de prefixo e dar erro de "agente
-  inválido" em vez de rodar normal. Contorno: reformule a tarefa pra não
-  começar exatamente nesse formato, ou use `--agent`/`/agent` global.
-- O streaming do Claude Code é sempre simulado (`(simulando…)`) — `claude
-  -p` não escreve stdout de forma incremental em modo não-interativo,
-  então não tem como ter streaming real dele hoje. Se isso mudar no
-  futuro, é só atualizar `AGENT_REGISTRY.claude.streamsIncrementally` em
-  `src/agents/registry.ts`.
-- `--dangerously-skip-permissions` do Claude Code nunca é habilitado por
-  este projeto.
-- **`.orquestradorrc`**: só o primeiro arquivo encontrado subindo os
-  diretórios vale — não tem fusão entre um `.orquestradorrc` de um
-  monorepo na raiz e outro numa subpasta específica (o mais próximo do
-  cwd simplesmente ganha, o de cima é ignorado por completo). `export
-  <runId>` não respeita o filtro por projeto (recebe um id explícito, não
-  faz sentido "limitar" isso — ver "Configuração por projeto"). O pacote
-  ainda não foi publicado no npm de verdade — `package.json` já está
-  pronto (metadados, `files`, `prepublishOnly`), mas falta rodar
-  `npm publish` manualmente.
-- O filtro de histórico por projeto (`isWithinProjectScope`, em
-  `storage/history.ts`) é testado como função pura; a integração completa
-  com SQLite (`listRuns`/`getLastRun` filtrando de verdade, `--all`
-  ignorando o filtro) foi validada manualmente, não via teste automatizado
-  — mesma decisão já documentada pro resto de `storage/history.ts`.
+- `doctor` confirma executáveis e Git, mas a autenticação só é conhecida ao
+  chamar o respectivo agente.
+- Custos são parciais: Claude reporta USD, Codex reporta tokens e Antigravity
+  pode não reportar uso compatível.
+- A entrega de mensagens entre agentes é cooperativa: o destinatário precisa
+  consultar sua caixa de entrada.
 
 ## Licença
 

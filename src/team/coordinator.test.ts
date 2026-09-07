@@ -37,6 +37,7 @@ describe("coordenador com Git real", () => {
     const bothStarted = new Promise<void>((resolve) => { release = resolve; });
     let active = 0, maxActive = 0;
     const worker = (agent: AgentName, file: string): AgentRunner => async (options) => {
+      expect(options.prompt).toContain(`.agents/${agent}.md`);
       active++; maxActive = Math.max(maxActive, active);
       if (++started === 2) release();
       await bothStarted;
