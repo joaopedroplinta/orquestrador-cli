@@ -1024,7 +1024,14 @@ export default function App({
           ajuda no risco de EIO do bug #3. */}
       <Box marginTop={1} flexDirection="column">
         <Text dimColor>{"─".repeat(columns)}</Text>
-        <Box>
+        {/* width={columns - 1}, não columns: uma linha de input que quebra
+            EXATAMENTE na última coluna do terminal deixa o terminal em
+            estado de "auto-wrap pendente"; como incrementalRendering
+            escreve linha por linha via cursor relativo, esse wrap
+            inesperado desalinha as linhas seguintes e duplica texto na
+            tela (bug real, reproduzido com PTY real digitando uma tarefa
+            longa o bastante pra quebrar linha exatamente na borda). */}
+        <Box width={columns - 1}>
           <Text color={status === "running" ? "gray" : "green"}>
             {status === "asking-agent" ? "> " : "❯ "}
           </Text>
